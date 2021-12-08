@@ -516,6 +516,17 @@ zink_draw(struct pipe_context *pctx,
       zink_rebind_all_buffers(ctx);
    }
 
+   if (!zink_screen(pctx->screen)->info.have_EXT_extended_dynamic_state) {
+      for (unsigned i = 0; i < ctx->element_state->hw_state.num_bindings; i++) {
+         unsigned binding = ctx->element_state->binding_map[i];
+         const struct pipe_vertex_buffer *vb = ctx->vertex_buffers + binding;
+         if (ctx->gfx_pipeline_state.bindings[i].stride != vb->stride) {
+            ctx->gfx_pipeline_state.bindings[i].stride = vb->stride;
+            ctx->gfx_pipeline_state.dirty = true;
+         }
+      }
+   }
+
    unsigned index_offset = 0;
    unsigned index_size = dinfo->index_size;
    struct pipe_resource *index_buffer = NULL;

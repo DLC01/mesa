@@ -517,7 +517,7 @@ libgallium = static_library(
   gnu_symbol_visibility : 'hidden',
   dependencies : [
     dep_libdrm, dep_llvm, dep_dl, dep_m, dep_thread, dep_lmsensors, dep_ws2_32,
-    idep_nir, idep_nir_headers, idep_mesautil,
+    idep_nir, idep_nir_headers, idep_mesautil, dep_a, dep_l
   ],
   build_by_default : false
 )

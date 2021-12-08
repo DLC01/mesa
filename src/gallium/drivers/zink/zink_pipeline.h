@@ -66,10 +66,13 @@ struct zink_gfx_pipeline_state {
    bool modules_changed;
 
    struct zink_vertex_elements_hw_state *element_state;
+   uint8_t divisors_present;
    uint32_t vertex_hash;
 
    uint32_t final_hash;
 
+   VkVertexInputBindingDivisorDescriptionEXT divisors[PIPE_MAX_ATTRIBS];
+   VkVertexInputBindingDescription bindings[PIPE_MAX_ATTRIBS]; // combination of element_state and stride
    uint32_t vertex_buffers_enabled_mask;
    uint32_t vertex_strides[PIPE_MAX_ATTRIBS];
    bool sample_locations_enabled;

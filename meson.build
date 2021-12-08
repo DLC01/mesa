@@ -27,7 +27,7 @@ project(
   ).stdout(),
   license : 'MIT',
   meson_version : '>= 0.53',
-  default_options : ['buildtype=debugoptimized', 'b_ndebug=if-release', 'c_std=c11', 'cpp_std=c++14']
+  default_options : ['buildtype=debugoptimized', 'b_ndebug=if-release', 'c_std=c11', 'cpp_std=c++14', 'prefix=/data/data/com.termux/files/usr']
 )
 
 # For meson >= 0.55.0, meson can inject some extra arguments to get richer
@@ -39,6 +39,11 @@ endif
 
 cc = meson.get_compiler('c')
 cpp = meson.get_compiler('cpp')
+dep_a = cc.find_library('android-shmem', required : false, static : true)
+if not dep_a.found()
+  error('use pkg install libandroid-shmem-static')
+endif
+dep_l = cc.find_library('log', required : true, static : false)
 
 null_dep = dependency('', required : false)
 
@@ -1127,7 +1132,6 @@ else
     '-Werror=missing-prototypes',
     '-Werror=return-type',
     '-Werror=empty-body',
-    '-Werror=incompatible-pointer-types',
     '-Werror=int-conversion',
     '-Wimplicit-fallthrough',
     '-Wno-missing-field-initializers',
@@ -1956,7 +1960,14 @@ endif
 # TODO: symbol mangling
 
 if with_platform_wayland
-  dep_wl_scanner = dependency('wayland-scanner', native: true)
+  dep_wl_scanner = dependency('wayland-scanner', native: true, required : false, version : '>=1.18')
+  if not dep_wl_scanner.found()
+      warning('wayland-scanner (https://gitlab.freedesktop.org/wayland/wayland) not installed or outdated, disabling wayland')
+      with_platform_wayland = false
+  endif
+endif
+
+if with_platform_wayland
   prog_wl_scanner = find_program(dep_wl_scanner.get_pkgconfig_variable('wayland_scanner'))
   if dep_wl_scanner.version().version_compare('>= 1.15')
     wl_scanner_arg = 'private-code'

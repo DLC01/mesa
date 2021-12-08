@@ -220,10 +220,19 @@ zink_bind_vertex_elements_state(struct pipe_context *pctx,
          key->size += 2 * size;
       }
       state->element_state = &ctx->element_state->hw_state;
-   } else {
-     state->element_state = NULL;
+      struct zink_vertex_elements_state *ves = cso;
+      for (int i = 0; i < state->element_state->num_bindings; ++i) {
+         state->bindings[i].binding = ves->bindings[i].binding;
+         state->bindings[i].inputRate = ves->bindings[i].inputRate;
+         if (ves->divisor[i]) {
+            state->divisors[state->divisors_present].divisor = ves->divisor[i];
+            state->divisors[state->divisors_present].binding = state->bindings[i].binding;
+            state->divisors_present++;
+         }
+      }
+   } else
+      state->element_state = NULL;
      ctx->vertex_buffers_dirty = false;
-   }
 }
 
 static void

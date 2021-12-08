@@ -56,7 +56,7 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
    if (!screen->info.have_EXT_vertex_input_dynamic_state || !state->element_state->num_attribs) {
       memset(&vertex_input_state, 0, sizeof(vertex_input_state));
       vertex_input_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-      vertex_input_state.pVertexBindingDescriptions = state->element_state->b.bindings;
+      vertex_input_state.pVertexBindingDescriptions = state->bindings;
       vertex_input_state.vertexBindingDescriptionCount = state->element_state->num_bindings;
       vertex_input_state.pVertexAttributeDescriptions = state->element_state->attribs;
       vertex_input_state.vertexAttributeDescriptionCount = state->element_state->num_attribs;
