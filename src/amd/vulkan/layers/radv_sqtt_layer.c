@@ -363,7 +363,12 @@ radv_handle_thread_trace(VkQueue _queue)
       radv_QueueWaitIdle(_queue);
 
       if (radv_get_thread_trace(queue, &thread_trace)) {
-         ac_dump_rgp_capture(&queue->device->physical_device->rad_info, &thread_trace, NULL);
+         struct ac_spm_trace_data *spm_trace = NULL;
+
+         if (queue->device->spm_trace.bo)
+            spm_trace = &queue->device->spm_trace;
+
+         ac_dump_rgp_capture(&queue->device->physical_device->rad_info, &thread_trace, spm_trace);
       } else {
          /* Trigger a new capture if the driver failed to get
           * the trace because the buffer was too small.
@@ -610,8 +615,7 @@ sqtt_CmdBindPipeline(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipeline
 
    API_MARKER(BindPipeline, commandBuffer, pipelineBindPoint, _pipeline);
 
-   if (radv_is_instruction_timing_enabled())
-      radv_describe_pipeline_bind(cmd_buffer, pipelineBindPoint, pipeline);
+   radv_describe_pipeline_bind(cmd_buffer, pipelineBindPoint, pipeline);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -994,17 +998,15 @@ sqtt_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache pipelineCache, ui
    if (result != VK_SUCCESS)
       return result;
 
-   if (radv_is_instruction_timing_enabled()) {
-      for (unsigned i = 0; i < count; i++) {
-         RADV_FROM_HANDLE(radv_pipeline, pipeline, pPipelines[i]);
+   for (unsigned i = 0; i < count; i++) {
+      RADV_FROM_HANDLE(radv_pipeline, pipeline, pPipelines[i]);
 
-         if (!pipeline)
-            continue;
+      if (!pipeline)
+         continue;
 
-         result = radv_register_pipeline(device, pipeline);
-         if (result != VK_SUCCESS)
-            goto fail;
-      }
+      result = radv_register_pipeline(device, pipeline);
+      if (result != VK_SUCCESS)
+         goto fail;
    }
 
    return VK_SUCCESS;
@@ -1030,17 +1032,15 @@ sqtt_CreateComputePipelines(VkDevice _device, VkPipelineCache pipelineCache, uin
    if (result != VK_SUCCESS)
       return result;
 
-   if (radv_is_instruction_timing_enabled()) {
-      for (unsigned i = 0; i < count; i++) {
-         RADV_FROM_HANDLE(radv_pipeline, pipeline, pPipelines[i]);
+   for (unsigned i = 0; i < count; i++) {
+      RADV_FROM_HANDLE(radv_pipeline, pipeline, pPipelines[i]);
 
-         if (!pipeline)
-            continue;
+      if (!pipeline)
+         continue;
 
-         result = radv_register_pipeline(device, pipeline);
-         if (result != VK_SUCCESS)
-            goto fail;
-      }
+      result = radv_register_pipeline(device, pipeline);
+      if (result != VK_SUCCESS)
+         goto fail;
    }
 
    return VK_SUCCESS;
@@ -1063,8 +1063,7 @@ sqtt_DestroyPipeline(VkDevice _device, VkPipeline _pipeline,
    if (!_pipeline)
       return;
 
-   if (radv_is_instruction_timing_enabled())
-      radv_unregister_pipeline(device, pipeline);
+   radv_unregister_pipeline(device, pipeline);
 
    radv_DestroyPipeline(_device, _pipeline, pAllocator);
 }
