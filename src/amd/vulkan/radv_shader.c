@@ -33,6 +33,7 @@
 #include "util/mesa-sha1.h"
 #include "util/u_atomic.h"
 #include "radv_debug.h"
+#include "radv_meta.h"
 #include "radv_private.h"
 #include "radv_shader_args.h"
 
@@ -102,6 +103,12 @@ radv_get_nir_options(struct radv_physical_device *device)
    };
 }
 
+static bool
+is_meta_shader(nir_shader *nir)
+{
+   return nir && nir->info.internal;
+}
+
 bool
 radv_can_dump_shader(struct radv_device *device, struct vk_shader_module *module,
                      bool meta_shader)
@@ -109,7 +116,8 @@ radv_can_dump_shader(struct radv_device *device, struct vk_shader_module *module
    if (!(device->instance->debug_flags & RADV_DEBUG_DUMP_SHADERS))
       return false;
    if (module)
-      return !module->nir || (device->instance->debug_flags & RADV_DEBUG_DUMP_META_SHADERS);
+      return !is_meta_shader(module->nir) ||
+             (device->instance->debug_flags & RADV_DEBUG_DUMP_META_SHADERS);
 
    return meta_shader;
 }
@@ -118,7 +126,8 @@ bool
 radv_can_dump_shader_stats(struct radv_device *device, struct vk_shader_module *module)
 {
    /* Only dump non-meta shader stats. */
-   return device->instance->debug_flags & RADV_DEBUG_DUMP_SHADER_STATS && module && !module->nir;
+   return device->instance->debug_flags & RADV_DEBUG_DUMP_SHADER_STATS && module &&
+          !is_meta_shader(module->nir);
 }
 
 void
@@ -434,8 +443,9 @@ radv_shader_compile_to_nir(struct radv_device *device, struct vk_shader_module *
    if (module->nir) {
       /* Some things such as our meta clear/blit code will give us a NIR
        * shader directly.  In that case, we just ignore the SPIR-V entirely
-       * and just use the NIR shader */
-      nir = module->nir;
+       * and just use the NIR shader.  We don't want to alter meta and RT
+       * shaders IR directly, so clone it first. */
+      nir = nir_shader_clone(NULL, module->nir);
       nir->options = &device->physical_device->nir_options;
       nir_validate_shader(nir, "in internal shader");
 
@@ -897,7 +907,7 @@ radv_consider_culling(struct radv_device *device, struct nir_shader *nir, uint64
                       unsigned num_vertices_per_primitive, const struct radv_shader_info *info)
 {
    /* Culling doesn't make sense for meta shaders. */
-   if (!!nir->info.name)
+   if (is_meta_shader(nir))
       return false;
 
    /* We don't support culling with multiple viewports yet. */
@@ -1786,7 +1796,7 @@ shader_compile(struct radv_device *device, struct vk_shader_module *module,
    options->address32_hi = device->physical_device->rad_info.address32_hi;
    options->has_ls_vgpr_init_bug = device->physical_device->rad_info.has_ls_vgpr_init_bug;
    options->enable_mrt_output_nan_fixup =
-      module && !module->nir && options->key.ps.enable_mrt_output_nan_fixup;
+      module && !is_meta_shader(module->nir) && options->key.ps.enable_mrt_output_nan_fixup;
    options->adjust_frag_coord_z = device->adjust_frag_coord_z;
    options->has_image_load_dcc_bug = device->physical_device->rad_info.has_image_load_dcc_bug;
    options->debug.func = radv_compiler_debug;
@@ -1919,7 +1929,7 @@ radv_create_trap_handler_shader(struct radv_device *device)
    struct radv_shader_binary *binary = NULL;
    struct radv_shader_info info = {0};
 
-   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "meta_trap_handler");
+   nir_builder b = radv_meta_init_shader(MESA_SHADER_COMPUTE, "meta_trap_handler");
 
    options.explicit_scratch_args = true;
    options.wgp_mode = radv_should_use_wgp_mode(device, MESA_SHADER_COMPUTE, &info);
