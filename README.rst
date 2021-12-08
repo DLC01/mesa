@@ -18,7 +18,8 @@ Meson (`docs/meson.rst <https://mesa3d.org/meson.html>`_):
 
 .. code-block:: sh
 
-  $ meson build -Dplatforma=x11,wayland -Dprefix=$PREFIX -Ddri3=enabled -Ddri-drivers=[] -Dgallium-drivers=swrast,zink -Dvulkan-drivers=[] -Degl=enabled -Dglx=dri -Dshared-glapi=enabled -Dshader-cache=enabled -Dgles1=enabled -Dgles2=enabled -Dllvm=enabled -Dshared-llvm=enabled -Dlmsensors=disabled -Dgbm=disabled -Dlibunwind=disabled -Dopencl-native=false -Dgallium-vdpau=disabled -Dgallium-xvmc=disabled -Dgallium-omx=disabled -Dgallium-va=disabled -Dgallium-xa=disabled -Dmicrosoft-clc=disabled -Dvalgrind=disabled -Dpower8=disabled ..
+  $ meson build -Dplatforma=x11,wayland -Dprefix=$PREFIX -Ddri3=enabled -Ddri-drivers=[] -Dgallium-drivers=swrast,zink -Dvulkan-drivers=[] -Degl=enabled -Dglx=dri -Dshared-glapi=enabled -Dshader-cache=enabled -Dgles1=enabled -Dgles2=enabled -Dllvm=enabled -Dshared-llvm=enabled -Dlmsensors=disabled -Dgbm=disabled -Dlibunwind=disabled -Dopencl-native=false -Dgallium-vdpau=disabled -Dgallium-xvmc=disabled -Dgallium-omx=disabled -Dgallium-va=disabled -Dgallium-xa=disabled -Dmicrosoft-clc=disabled -Dvalgrind=disabled -Dpower8=disabled
+  $ ninja -C build -j4
 
 
 Support
