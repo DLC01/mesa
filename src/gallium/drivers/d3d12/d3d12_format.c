@@ -28,6 +28,8 @@
 #include "util/u_math.h"
 #include "util/compiler.h"
 
+#define MAP_FORMAT_YUV(NAME) \
+   [PIPE_FORMAT_ ## NAME] = DXGI_FORMAT_ ## NAME,
 #define MAP_FORMAT_NO_TYPELESS(BITS, TYPE) \
    [PIPE_FORMAT_ ## BITS ## _ ## TYPE] = DXGI_FORMAT_ ## BITS ## _ ## TYPE,
 #define MAP_FORMAT2_NO_TYPELESS(BITS1, TYPE1, BITS2, TYPE2) \
@@ -160,7 +162,9 @@
 \
    MAP_FORMAT2(Z24_UNORM_S8, UINT, R24G8, TYPELESS) \
    MAP_FORMAT2(Z32_FLOAT_S8X24, UINT, R32G8X24, TYPELESS) \
-   MAP_FORMAT2(X32_S8X24, UINT, R32G8X24, TYPELESS)
+   MAP_FORMAT2(X32_S8X24, UINT, R32G8X24, TYPELESS) \
+\
+   MAP_FORMAT_YUV(NV12)
 
 static const DXGI_FORMAT formats[PIPE_FORMAT_COUNT] = {
    FORMAT_TABLE()
@@ -298,7 +302,7 @@ d3d12_get_resource_srv_format(enum pipe_format f, enum pipe_texture_target targe
         PIPE_SWIZZLE_0, PIPE_SWIZZLE_1, PIPE_SWIZZLE_NONE }
 
 struct d3d12_format_info
-d3d12_get_format_info(enum pipe_format pformat, enum pipe_texture_target target)
+d3d12_get_format_info(enum pipe_format resource_format, enum pipe_format pformat, enum pipe_texture_target target)
 {
    DEF_SWIZZLE(IDENTITY, X, Y, Z, W);
    DEF_SWIZZLE(RGB1, X, Y, Z, 1);
@@ -319,9 +323,16 @@ d3d12_get_format_info(enum pipe_format pformat, enum pipe_texture_target target)
 
    const struct util_format_description
       *format_desc = util_format_description(pformat);
+   unsigned plane_count = util_format_get_num_planes(resource_format);
    if (!util_format_is_srgb(pformat)) {
       if (target == PIPE_BUFFER && util_format_is_alpha(pformat)) {
          swizzle = BUFFER_SWIZZLE;
+      } else if (plane_count > 1) {
+         for (plane_slice = 0; plane_slice < plane_count; ++plane_slice) {
+            if (util_format_get_plane_format(resource_format, plane_slice) == pformat)
+               break;
+         }
+         assert(plane_slice < plane_count);
       } else if (pformat == PIPE_FORMAT_A8_UNORM) {
          /* no need to swizzle, it's natively supported */
       } else if (util_format_is_intensity(pformat)) {

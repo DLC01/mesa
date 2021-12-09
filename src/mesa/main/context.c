@@ -154,6 +154,8 @@
 #include <stdbool.h>
 #include "util/u_memory.h"
 
+#include "state_tracker/st_cb_texture.h"
+#include "state_tracker/st_cb_flush.h"
 
 #ifndef MESA_VERBOSE
 int MESA_VERBOSE = 0;
@@ -1077,7 +1079,7 @@ _mesa_initialize_dispatch_tables(struct gl_context *ctx)
  * This includes allocating all the other structs and arrays which hang off of
  * the context by pointers.
  * Note that the driver needs to pass in its dd_function_table here since
- * we need to at least call driverFunctions->NewTextureObject to create the
+ * we need to at least call st_NewTextureObject to create the
  * default texture objects.
  *
  * Called by _mesa_create_context().
@@ -1107,9 +1109,6 @@ _mesa_initialize_context(struct gl_context *ctx,
 {
    struct gl_shared_state *shared;
    int i;
-
-   assert(driverFunctions->NewTextureObject);
-   assert(driverFunctions->FreeTextureImageBuffer);
 
    ctx->API = api;
    ctx->DrawBuffer = NULL;
@@ -1635,8 +1634,7 @@ _mesa_make_current( struct gl_context *newCtx,
        curCtx->Const.ContextReleaseBehavior ==
        GL_CONTEXT_RELEASE_BEHAVIOR_FLUSH) {
       FLUSH_VERTICES(curCtx, 0, 0);
-      if (curCtx->Driver.Flush)
-         curCtx->Driver.Flush(curCtx, 0);
+      st_glFlush(curCtx, 0);
    }
 
    /* Call this periodically to detect when the user has begun using
@@ -1791,12 +1789,10 @@ _mesa_get_dispatch(struct gl_context *ctx)
 void
 _mesa_flush(struct gl_context *ctx)
 {
+   bool async = !ctx->Shared->HasExternallySharedImages;
    FLUSH_VERTICES(ctx, 0, 0);
-   if (ctx->Driver.Flush) {
-      bool async = !ctx->Shared->HasExternallySharedImages;
 
-      ctx->Driver.Flush(ctx, async ? PIPE_FLUSH_ASYNC : 0);
-   }
+   st_glFlush(ctx, async ? PIPE_FLUSH_ASYNC : 0);
 }
 
 
@@ -1815,9 +1811,7 @@ _mesa_Finish(void)
 
    FLUSH_VERTICES(ctx, 0, 0);
 
-   if (ctx->Driver.Finish) {
-      ctx->Driver.Finish(ctx);
-   }
+   st_glFinish(ctx);
 }
 
 

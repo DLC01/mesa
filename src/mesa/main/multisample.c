@@ -32,6 +32,8 @@
 #include "main/glformats.h"
 #include "main/state.h"
 
+#include "state_tracker/st_format.h"
+#include "state_tracker/st_cb_msaa.h"
 
 /**
  * Called via glSampleCoverageARB
@@ -94,7 +96,7 @@ _mesa_GetMultisamplefv(GLenum pname, GLuint index, GLfloat * val)
          return;
       }
 
-      ctx->Driver.GetSamplePosition(ctx, ctx->DrawBuffer, index, val);
+      st_GetSamplePosition(ctx, ctx->DrawBuffer, index, val);
 
       /* FBOs can be upside down (winsys always are)*/
       if (ctx->DrawBuffer->FlipY)
@@ -294,8 +296,8 @@ _mesa_check_sample_count(struct gl_context *ctx, GLenum target,
       GLint buffer[16] = {-1};
       GLint limit;
 
-      ctx->Driver.QueryInternalFormat(ctx, target, internalFormat,
-                                      GL_SAMPLES, buffer);
+      st_QueryInternalFormat(ctx, target, internalFormat,
+                             GL_SAMPLES, buffer);
       /* since the query returns samples sorted in descending order,
        * the first element is the greatest supported sample value.
        */

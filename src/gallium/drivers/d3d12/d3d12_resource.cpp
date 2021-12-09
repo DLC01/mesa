@@ -253,6 +253,48 @@ init_texture(struct d3d12_screen *screen,
    return true;
 }
 
+static void
+convert_planar_resource(struct d3d12_resource *res)
+{
+   unsigned num_planes = util_format_get_num_planes(res->base.b.format);
+   if (num_planes <= 1 || res->base.b.next || !res->bo)
+      return;
+
+   struct pipe_resource *next = nullptr;
+   struct pipe_resource *planes[3] = {
+      &res->base.b, nullptr, nullptr
+   };
+   for (int plane = num_planes - 1; plane >= 0; --plane) {
+      struct d3d12_resource *plane_res = d3d12_resource(planes[plane]);
+      if (!plane_res) {
+         plane_res = CALLOC_STRUCT(d3d12_resource);
+         *plane_res = *res;
+         d3d12_bo_reference(plane_res->bo);
+         pipe_reference_init(&plane_res->base.b.reference, 1);
+         threaded_resource_init(&plane_res->base.b, false, 0);
+      }
+
+      plane_res->base.b.next = next;
+      next = &plane_res->base.b;
+
+      plane_res->base.b.format = util_format_get_plane_format(res->base.b.format, plane);
+      plane_res->base.b.width0 = util_format_get_plane_width(res->base.b.format, plane, res->base.b.width0);
+      plane_res->base.b.height0 = util_format_get_plane_height(res->base.b.format, plane, res->base.b.height0);
+
+#if DEBUG
+      struct d3d12_screen *screen = d3d12_screen(res->base.b.screen);
+      D3D12_RESOURCE_DESC desc = res->bo->res->GetDesc();
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT placed_footprint = {};
+      D3D12_SUBRESOURCE_FOOTPRINT *footprint = &placed_footprint.Footprint;
+      unsigned subresource = plane * desc.MipLevels * desc.DepthOrArraySize;
+      screen->dev->GetCopyableFootprints(&desc, subresource, 1, 0, &placed_footprint, nullptr, nullptr, nullptr);
+      assert(plane_res->base.b.width0 == footprint->Width);
+      assert(plane_res->base.b.height0 == footprint->Height);
+      assert(plane_res->base.b.depth0 == footprint->Depth);
+#endif
+   }
+}
+
 static struct pipe_resource *
 d3d12_resource_create(struct pipe_screen *pscreen,
                       const struct pipe_resource *templ)
@@ -262,6 +304,7 @@ d3d12_resource_create(struct pipe_screen *pscreen,
    bool ret;
 
    res->base.b = *templ;
+   res->overall_format = templ->format;
 
    if (D3D12_DEBUG_RESOURCE & d3d12_debug) {
       debug_printf("D3D12: Create %sresource %s@%d %dx%dx%d as:%d mip:%d\n",
@@ -290,6 +333,8 @@ d3d12_resource_create(struct pipe_screen *pscreen,
 
    memset(&res->bind_counts, 0, sizeof(d3d12_resource::bind_counts));
 
+   convert_planar_resource(res);
+
    return &res->base.b;
 }
 
@@ -298,6 +343,7 @@ d3d12_resource_from_handle(struct pipe_screen *pscreen,
                           const struct pipe_resource *templ,
                           struct winsys_handle *handle, unsigned usage)
 {
+   struct d3d12_screen *screen = d3d12_screen(pscreen);
    if (handle->type != WINSYS_HANDLE_TYPE_D3D12_RES &&
        handle->type != WINSYS_HANDLE_TYPE_FD)
       return NULL;
@@ -306,11 +352,22 @@ d3d12_resource_from_handle(struct pipe_screen *pscreen,
    if (!res)
       return NULL;
 
+   if (templ && templ->next) {
+      struct d3d12_resource* next = d3d12_resource(templ->next);
+      if (next->bo) {
+         res->base.b = *templ;
+         res->bo = next->bo;
+         d3d12_bo_reference(res->bo);
+      }
+   }
+
    pipe_reference_init(&res->base.b.reference, 1);
    res->base.b.screen = pscreen;
 
    ID3D12Resource *d3d12_res = nullptr;
-   if (handle->type == WINSYS_HANDLE_TYPE_D3D12_RES) {
+   if (res->bo) {
+      d3d12_res = res->bo->res;
+   } else if (handle->type == WINSYS_HANDLE_TYPE_D3D12_RES) {
       d3d12_res = (ID3D12Resource *)handle->com_obj;
    } else {
       struct d3d12_screen *screen = d3d12_screen(pscreen);
@@ -323,14 +380,28 @@ d3d12_resource_from_handle(struct pipe_screen *pscreen,
       screen->dev->OpenSharedHandle(d3d_handle, IID_PPV_ARGS(&d3d12_res));
    }
 
+   D3D12_PLACED_SUBRESOURCE_FOOTPRINT placed_footprint = {};
+   D3D12_SUBRESOURCE_FOOTPRINT *footprint = &placed_footprint.Footprint;
    D3D12_RESOURCE_DESC incoming_res_desc;
 
    if (!d3d12_res)
       goto invalid;
 
    incoming_res_desc = d3d12_res->GetDesc();
-   if (incoming_res_desc.Width > UINT32_MAX ||
-       incoming_res_desc.Height > UINT16_MAX) {
+
+   /* Get a description for this plane */
+   if (templ && handle->format != templ->format) {
+      unsigned subresource = handle->plane * incoming_res_desc.MipLevels * incoming_res_desc.DepthOrArraySize;
+      screen->dev->GetCopyableFootprints(&incoming_res_desc, subresource, 1, 0, &placed_footprint, nullptr, nullptr, nullptr);
+   } else {
+      footprint->Format = incoming_res_desc.Format;
+      footprint->Width = incoming_res_desc.Width;
+      footprint->Height = incoming_res_desc.Height;
+      footprint->Depth = incoming_res_desc.DepthOrArraySize;
+   }
+
+   if (footprint->Width > UINT32_MAX ||
+       footprint->Height > UINT16_MAX) {
       debug_printf("d3d12: Importing resource too large\n");
       goto invalid;
    }
@@ -358,7 +429,7 @@ d3d12_resource_from_handle(struct pipe_screen *pscreen,
       break;
    case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
       res->base.b.target = PIPE_TEXTURE_3D;
-      res->base.b.depth0 = incoming_res_desc.DepthOrArraySize;
+      res->base.b.depth0 = footprint->Depth;
       break;
    default:
       unreachable("Invalid dimension");
@@ -408,12 +479,18 @@ d3d12_resource_from_handle(struct pipe_screen *pscreen,
             res->base.b.last_level + 1, templ->last_level + 1);
          goto invalid;
       }
-      if (incoming_res_desc.Format != d3d12_get_format(templ->format) &&
-          incoming_res_desc.Format != d3d12_get_typeless_format(templ->format)) {
+      if ((footprint->Format != d3d12_get_format(templ->format) &&
+           footprint->Format != d3d12_get_typeless_format(templ->format)) ||
+          (incoming_res_desc.Format != d3d12_get_format((enum pipe_format)handle->format) &&
+           incoming_res_desc.Format != d3d12_get_typeless_format((enum pipe_format)handle->format))) {
          debug_printf("d3d12: Importing resource with mismatched format: "
-            "could be DXGI format %d or %d, but is %d\n",
+            "plane could be DXGI format %d or %d, but is %d, "
+            "overall could be DXGI format %d or %d, but is %d\n",
             d3d12_get_format(templ->format),
             d3d12_get_typeless_format(templ->format),
+            footprint->Format,
+            d3d12_get_format((enum pipe_format)handle->format),
+            d3d12_get_typeless_format((enum pipe_format)handle->format),
             incoming_res_desc.Format);
          goto invalid;
       }
@@ -423,6 +500,7 @@ d3d12_resource_from_handle(struct pipe_screen *pscreen,
       }
 
       res->base.b.format = templ->format;
+      res->overall_format = (enum pipe_format)handle->format;
    } else {
       /* Search the pipe format lookup table for an entry */
       res->base.b.format = d3d12_get_pipe_format(incoming_res_desc.Format);
@@ -436,16 +514,29 @@ d3d12_resource_from_handle(struct pipe_screen *pscreen,
             goto invalid;
          }
       }
+
+      res->overall_format = res->base.b.format;
    }
 
-   res->dxgi_format = d3d12_get_format(res->base.b.format);
-   res->bo = d3d12_bo_wrap_res(d3d12_res, res->base.b.format);
+   if (!templ)
+      handle->format = res->overall_format;
+
+   res->dxgi_format = d3d12_get_format(res->overall_format);
+
+   if (!res->bo) {
+      res->bo = d3d12_bo_wrap_res(d3d12_res, res->overall_format);
+   }
    init_valid_range(res);
+
    threaded_resource_init(&res->base.b, false, 0);
+   convert_planar_resource(res);
+
    return &res->base.b;
 
 invalid:
-   if (d3d12_res)
+   if (res->bo)
+      d3d12_bo_unreference(res->bo);
+   else if (d3d12_res)
       d3d12_res->Release();
    FREE(res);
    return NULL;

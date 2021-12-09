@@ -3248,28 +3248,6 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
          goto fail;
    }
 
-   for (int family = 0; family < RADV_MAX_QUEUE_FAMILIES; ++family) {
-      device->empty_cs[family] = device->ws->cs_create(device->ws, family);
-      if (!device->empty_cs[family])
-         goto fail;
-
-      switch (family) {
-      case RADV_QUEUE_GENERAL:
-         radeon_emit(device->empty_cs[family], PKT3(PKT3_CONTEXT_CONTROL, 1, 0));
-         radeon_emit(device->empty_cs[family], CC0_UPDATE_LOAD_ENABLES(1));
-         radeon_emit(device->empty_cs[family], CC1_UPDATE_SHADOW_ENABLES(1));
-         break;
-      case RADV_QUEUE_COMPUTE:
-         radeon_emit(device->empty_cs[family], PKT3(PKT3_NOP, 0, 0));
-         radeon_emit(device->empty_cs[family], 0);
-         break;
-      }
-
-      result = device->ws->cs_finalize(device->empty_cs[family]);
-      if (result != VK_SUCCESS)
-         goto fail;
-   }
-
    if (device->physical_device->rad_info.chip_class >= GFX7)
       cik_create_gfx_config(device);
 
@@ -3355,8 +3333,6 @@ radv_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
          radv_queue_finish(&device->queues[i][q]);
       if (device->queue_count[i])
          vk_free(&device->vk.alloc, device->queues[i]);
-      if (device->empty_cs[i])
-         device->ws->cs_destroy(device->empty_cs[i]);
    }
 
    for (unsigned i = 0; i < RADV_NUM_HW_CTX; i++) {
@@ -4760,9 +4736,9 @@ radv_queue_submit_deferred(struct radv_deferred_queue_submission *submission,
    }
 
    if (!submission->cmd_buffer_count) {
-      result = queue->device->ws->cs_submit(ctx, queue->vk.index_in_family,
-                                            &queue->device->empty_cs[queue->vk.queue_family_index], 1,
-                                            NULL, NULL, &sem_info, false);
+      result =
+         queue->device->ws->cs_submit(ctx, queue->vk.queue_family_index, queue->vk.index_in_family,
+                                      NULL, 0, NULL, NULL, &sem_info, false);
       if (result != VK_SUCCESS)
          goto fail;
    } else {
@@ -4791,9 +4767,9 @@ radv_queue_submit_deferred(struct radv_deferred_queue_submission *submission,
          sem_info.cs_emit_wait = j == 0;
          sem_info.cs_emit_signal = j + advance == submission->cmd_buffer_count;
 
-         result = queue->device->ws->cs_submit(ctx, queue->vk.index_in_family, cs_array + j, advance,
-                                               initial_preamble, continue_preamble_cs, &sem_info,
-                                               can_patch);
+         result = queue->device->ws->cs_submit(
+            ctx, queue->vk.queue_family_index, queue->vk.index_in_family, cs_array + j, advance,
+            initial_preamble, continue_preamble_cs, &sem_info, can_patch);
          if (result != VK_SUCCESS) {
             free(cs_array);
             goto fail;
@@ -5012,8 +4988,8 @@ radv_queue_internal_submit(struct radv_queue *queue, struct radeon_cmdbuf *cs)
       return false;
 
    result =
-      queue->device->ws->cs_submit(ctx, queue->vk.index_in_family, &cs, 1,
-                                   NULL, NULL, &sem_info, false);
+      queue->device->ws->cs_submit(ctx, queue->vk.queue_family_index, queue->vk.index_in_family,
+                                   &cs, 1, NULL, NULL, &sem_info, false);
    radv_free_sem_info(&sem_info);
    if (result != VK_SUCCESS)
       return false;

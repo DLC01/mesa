@@ -46,7 +46,6 @@ extern "C" {
 #endif
 
 
-struct dd_function_table;
 struct draw_context;
 struct draw_stage;
 struct gen_mipmap_state;
@@ -454,7 +453,14 @@ struct st_framebuffer
    struct list_head head;
 };
 
+void st_Enable(struct gl_context *ctx, GLenum cap);
+void st_query_memory_info(struct gl_context *ctx, struct gl_memory_info *out);
 
+void st_invalidate_state(struct gl_context *ctx);
+void st_get_driver_uuid(struct gl_context *ctx, char *uuid);
+void st_get_device_uuid(struct gl_context *ctx, char *uuid);
+void st_set_background_context(struct gl_context *ctx,
+                               struct util_queue_monitoring *queue_info);
 #ifdef __cplusplus
 }
 #endif

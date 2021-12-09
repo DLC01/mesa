@@ -76,6 +76,10 @@
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 
+#include "state_tracker/st_cb_texture.h"
+#include "state_tracker/st_cb_bitmap.h"
+#include "state_tracker/st_cb_bufferobjects.h"
+
 #define USE_BITMAP_ATLAS 1
 
 static bool
@@ -856,7 +860,7 @@ void
 _mesa_delete_bitmap_atlas(struct gl_context *ctx, struct gl_bitmap_atlas *atlas)
 {
    if (atlas->texObj) {
-      ctx->Driver.DeleteTexture(ctx, atlas->texObj);
+      st_DeleteTextureObject(ctx, atlas->texObj);
    }
    free(atlas->glyphs);
    free(atlas);
@@ -1000,7 +1004,7 @@ build_bitmap_atlas(struct gl_context *ctx, struct gl_bitmap_atlas *atlas,
    }
 
    /* Create atlas texture (texture ID is irrelevant) */
-   atlas->texObj = ctx->Driver.NewTextureObject(ctx, 999, GL_TEXTURE_RECTANGLE);
+   atlas->texObj = st_NewTextureObject(ctx, 999, GL_TEXTURE_RECTANGLE);
    if (!atlas->texObj) {
       goto out_of_memory;
    }
@@ -1029,14 +1033,14 @@ build_bitmap_atlas(struct gl_context *ctx, struct gl_bitmap_atlas *atlas,
                                  GL_ALPHA, MESA_FORMAT_A_UNORM8);
 
    /* alloc image storage */
-   if (!ctx->Driver.AllocTextureImageBuffer(ctx, atlas->texImage)) {
+   if (!st_AllocTextureImageBuffer(ctx, atlas->texImage)) {
       goto out_of_memory;
    }
 
    /* map teximage, load with bitmap glyphs */
-   ctx->Driver.MapTextureImage(ctx, atlas->texImage, 0,
-                               0, 0, atlas->texWidth, atlas->texHeight,
-                               GL_MAP_WRITE_BIT, &map, &map_stride);
+   st_MapTextureImage(ctx, atlas->texImage, 0,
+                      0, 0, atlas->texWidth, atlas->texHeight,
+                      GL_MAP_WRITE_BIT, &map, &map_stride);
    if (!map) {
       goto out_of_memory;
    }
@@ -1069,7 +1073,7 @@ build_bitmap_atlas(struct gl_context *ctx, struct gl_bitmap_atlas *atlas,
       }
    }
 
-   ctx->Driver.UnmapTextureImage(ctx, atlas->texImage, 0);
+   st_UnmapTextureImage(ctx, atlas->texImage, 0);
 
    atlas->complete = true;
 
@@ -1079,7 +1083,7 @@ out_of_memory:
    _mesa_error(ctx, GL_OUT_OF_MEMORY, "Display list bitmap atlas");
 fail:
    if (atlas->texObj) {
-      ctx->Driver.DeleteTexture(ctx, atlas->texObj);
+      st_DeleteTextureObject(ctx, atlas->texObj);
    }
    free(atlas->glyphs);
    atlas->glyphs = NULL;
@@ -1470,9 +1474,9 @@ unpack_image(struct gl_context *ctx, GLuint dimensions,
       GLvoid *image;
 
       map = (GLubyte *)
-         ctx->Driver.MapBufferRange(ctx, 0, unpack->BufferObj->Size,
-                                    GL_MAP_READ_BIT, unpack->BufferObj,
-                                    MAP_INTERNAL);
+         st_bufferobj_map_range(ctx, 0, unpack->BufferObj->Size,
+                                GL_MAP_READ_BIT, unpack->BufferObj,
+                                MAP_INTERNAL);
       if (!map) {
          /* unable to map src buffer! */
          _mesa_error(ctx, GL_INVALID_OPERATION, "unable to map PBO");
@@ -1483,7 +1487,7 @@ unpack_image(struct gl_context *ctx, GLuint dimensions,
       image = _mesa_unpack_image(dimensions, width, height, depth,
                                  format, type, src, unpack);
 
-      ctx->Driver.UnmapBuffer(ctx, unpack->BufferObj, MAP_INTERNAL);
+      st_bufferobj_unmap(ctx, unpack->BufferObj, MAP_INTERNAL);
 
       if (!image) {
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "display list construction");
@@ -13464,8 +13468,7 @@ _mesa_GenLists(GLsizei range)
    }
 
    if (USE_BITMAP_ATLAS &&
-       range > 16 &&
-       ctx->Driver.DrawAtlasBitmaps) {
+       range > 16) {
       /* "range > 16" is a rough heuristic to guess when glGenLists might be
        * used to allocate display lists for glXUseXFont or wglUseFontBitmaps.
        * Create the empty atlas now.
@@ -13811,8 +13814,7 @@ render_bitmap_atlas(struct gl_context *ctx, GLsizei n, GLenum type,
    if (!USE_BITMAP_ATLAS ||
        !ctx->Current.RasterPosValid ||
        ctx->List.ListBase == 0 ||
-       type != GL_UNSIGNED_BYTE ||
-       !ctx->Driver.DrawAtlasBitmaps) {
+       type != GL_UNSIGNED_BYTE) {
       /* unsupported */
       return false;
    }
@@ -13849,7 +13851,7 @@ render_bitmap_atlas(struct gl_context *ctx, GLsizei n, GLenum type,
       }
    }
 
-   ctx->Driver.DrawAtlasBitmaps(ctx, atlas, n, (const GLubyte *) lists);
+   st_DrawAtlasBitmaps(ctx, atlas, n, (const GLubyte *) lists);
 
    return true;
 }

@@ -43,27 +43,19 @@
 #include "st_context.h"
 #include "st_debug.h"
 #include "st_cb_bitmap.h"
-#include "st_cb_blit.h"
 #include "st_cb_bufferobjects.h"
 #include "st_cb_clear.h"
 #include "st_cb_compute.h"
 #include "st_cb_condrender.h"
-#include "st_cb_copyimage.h"
 #include "st_cb_drawpixels.h"
-#include "st_cb_rasterpos.h"
 #include "st_cb_drawtex.h"
 #include "st_cb_eglimage.h"
-#include "st_cb_fbo.h"
 #include "st_cb_feedback.h"
-#include "st_cb_msaa.h"
 #include "st_cb_perfmon.h"
 #include "st_cb_perfquery.h"
 #include "st_cb_program.h"
 #include "st_cb_queryobj.h"
-#include "st_cb_readpixels.h"
-#include "st_cb_texture.h"
 #include "st_cb_flush.h"
-#include "st_cb_viewport.h"
 #include "st_atom.h"
 #include "st_draw.h"
 #include "st_extensions.h"
@@ -88,11 +80,8 @@
 DEBUG_GET_ONCE_BOOL_OPTION(mesa_mvp_dp4, "MESA_MVP_DP4", FALSE)
 
 
-/**
- * Called via ctx->Driver.Enable()
- */
-static void
-st_Enable(struct gl_context *ctx, GLenum cap, UNUSED GLboolean state)
+void
+st_Enable(struct gl_context *ctx, GLenum cap)
 {
    struct st_context *st = st_context(ctx);
 
@@ -109,11 +98,7 @@ st_Enable(struct gl_context *ctx, GLenum cap, UNUSED GLboolean state)
    }
 }
 
-
-/**
- * Called via ctx->Driver.QueryMemoryInfo()
- */
-static void
+void
 st_query_memory_info(struct gl_context *ctx, struct gl_memory_info *out)
 {
    struct pipe_screen *screen = st_context(ctx)->screen;
@@ -194,10 +179,7 @@ st_vp_uses_current_values(const struct gl_context *ctx)
 }
 
 
-/**
- * Called via ctx->Driver.UpdateState()
- */
-static void
+void
 st_invalidate_state(struct gl_context *ctx)
 {
    GLbitfield new_state = ctx->NewState;
@@ -886,7 +868,7 @@ st_emit_string_marker(struct gl_context *ctx, const GLchar *string, GLsizei len)
 }
 
 
-static void
+void
 st_set_background_context(struct gl_context *ctx,
                           struct util_queue_monitoring *queue_info)
 {
@@ -899,7 +881,7 @@ st_set_background_context(struct gl_context *ctx,
 }
 
 
-static void
+void
 st_get_device_uuid(struct gl_context *ctx, char *uuid)
 {
    struct pipe_screen *screen = st_context(ctx)->screen;
@@ -910,7 +892,7 @@ st_get_device_uuid(struct gl_context *ctx, char *uuid)
 }
 
 
-static void
+void
 st_get_driver_uuid(struct gl_context *ctx, char *uuid)
 {
    struct pipe_screen *screen = st_context(ctx)->screen;
@@ -937,41 +919,17 @@ st_init_driver_functions(struct pipe_screen *screen,
                          bool has_egl_image_validate)
 {
    st_init_draw_functions(screen, functions);
-   st_init_blit_functions(functions);
    st_init_bufferobject_functions(screen, functions);
-   st_init_clear_functions(functions);
-   st_init_bitmap_functions(functions);
-   st_init_copy_image_functions(functions);
-   st_init_drawpixels_functions(functions);
-   st_init_rasterpos_functions(functions);
-
-   st_init_drawtex_functions(functions);
 
    st_init_eglimage_functions(functions, has_egl_image_validate);
 
-   st_init_fbo_functions(functions);
-   st_init_feedback_functions(functions);
-   st_init_msaa_functions(functions);
-   st_init_perfmon_functions(functions);
-   st_init_perfquery_functions(functions);
    st_init_program_functions(functions);
-   st_init_readpixels_functions(functions);
-   st_init_texture_functions(functions);
    st_init_flush_functions(screen, functions);
-   st_init_viewport_functions(functions);
-   st_init_compute_functions(functions);
 
    st_init_vdpau_functions(functions);
 
    if (screen->get_param(screen, PIPE_CAP_STRING_MARKER))
       functions->EmitStringMarker = st_emit_string_marker;
-
-   functions->Enable = st_Enable;
-   functions->UpdateState = st_invalidate_state;
-   functions->QueryMemoryInfo = st_query_memory_info;
-   functions->SetBackgroundContext = st_set_background_context;
-   functions->GetDriverUuid = st_get_driver_uuid;
-   functions->GetDeviceUuid = st_get_device_uuid;
 
    /* GL_ARB_get_program_binary */
    functions->GetProgramBinaryDriverSHA1 = st_get_program_binary_driver_sha1;
