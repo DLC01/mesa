@@ -212,6 +212,9 @@ i915_ioctl_get_param(int fd, unsigned long request, void *arg)
    case I915_PARAM_PERF_REVISION:
       *gp->value = 3;
       return 0;
+   case I915_PARAM_HAS_USERPTR_PROBE:
+      *gp->value = 0;
+      return 0;
    default:
       break;
    }
@@ -300,6 +303,89 @@ i915_ioctl_query(int fd, unsigned long request, void *arg)
          int ret = query_write_topology(item);
          if (ret)
             item->length = ret;
+         break;
+      }
+
+      case DRM_I915_QUERY_ENGINE_INFO: {
+         uint32_t num_copy = 1;
+         uint32_t num_render = 1;
+         uint32_t num_engines = num_copy + num_render;
+
+         struct drm_i915_query_engine_info *info =
+            (struct drm_i915_query_engine_info*)(uintptr_t)item->data_ptr;
+
+         int32_t data_length =
+            sizeof(*info) +
+               num_engines * sizeof(info->engines[0]);
+
+         if (item->length == 0) {
+            item->length = data_length;
+            return 0;
+         } else if (item->length < data_length) {
+            item->length = -EINVAL;
+            return -1;
+         } else {
+            memset(info, 0, data_length);
+
+            for (uint32_t e = 0; e < num_render; e++, info->num_engines++) {
+               info->engines[info->num_engines].engine.engine_class =
+                  I915_ENGINE_CLASS_RENDER;
+               info->engines[info->num_engines].engine.engine_instance = e;
+            }
+
+            for (uint32_t e = 0; e < num_copy; e++, info->num_engines++) {
+               info->engines[info->num_engines].engine.engine_class =
+                  I915_ENGINE_CLASS_COPY;
+               info->engines[info->num_engines].engine.engine_instance = e;
+            }
+
+            assert(info->num_engines == num_engines);
+
+            if (item->length > data_length)
+               item->length = data_length;
+
+            return 0;
+         }
+      }
+
+      case DRM_I915_QUERY_PERF_CONFIG:
+         /* This is known but not supported by the shim.  Handling this here
+          * suppresses some spurious warning messages in shader-db runs.
+          */
+         item->length = -EINVAL;
+         break;
+
+      case DRM_I915_QUERY_MEMORY_REGIONS: {
+         uint32_t num_regions = i915.devinfo.has_local_mem ? 2 : 1;
+         struct drm_i915_query_memory_regions *info =
+            (struct drm_i915_query_memory_regions*)(uintptr_t)item->data_ptr;
+         size_t data_length = sizeof(struct drm_i915_query_memory_regions) +
+            num_regions * sizeof(struct drm_i915_memory_region_info);
+
+         if (item->length == 0) {
+            item->length = data_length;
+            return 0;
+         } else if (item->length < (int32_t)data_length) {
+            item->length = -EINVAL;
+            return -1;
+         } else {
+            memset(info, 0, data_length);
+            info->num_regions = num_regions;
+            info->regions[0].region.memory_class = I915_MEMORY_CLASS_SYSTEM;
+            info->regions[0].region.memory_instance = 0;
+            /* Report 4Gb even if it's not actually true, it looks more like a
+             * real device.
+             */
+            info->regions[0].probed_size = 4ull * 1024 * 1024 * 1024;
+            info->regions[0].unallocated_size = -1ll;
+            if (i915.devinfo.has_local_mem) {
+               info->regions[1].region.memory_class = I915_MEMORY_CLASS_DEVICE;
+               info->regions[1].region.memory_instance = 0;
+               info->regions[1].probed_size = 4ull * 1024 * 1024 * 1024;
+               info->regions[1].unallocated_size = -1ll;
+            }
+            return 0;
+         }
          break;
       }
 
