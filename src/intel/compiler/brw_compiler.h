@@ -92,22 +92,10 @@ struct brw_compiler {
    bool constant_buffer_0_is_relative;
 
    /**
-    * Whether or not the driver supports pull constants.  If not, the compiler
-    * will attempt to push everything.
-    */
-   bool supports_pull_constants;
-
-   /**
     * Whether or not the driver supports NIR shader constants.  This controls
     * whether nir_opt_large_constants will be run.
     */
    bool supports_shader_constants;
-
-   /**
-    * Whether or not the driver wants uniform params to be compacted by the
-    * back-end compiler.
-    */
-   bool compact_params;
 
    /**
     * Whether or not the driver wants variable group size to be lowered by the
@@ -503,9 +491,7 @@ struct brw_wm_prog_key {
    bool clamp_fragment_color:1;
    bool persample_interp:1;
    bool multisample_fbo:1;
-   bool frag_coord_adds_sample_pos:1;
    enum brw_wm_aa_enable line_aa:2;
-   bool high_quality_derivatives:1;
    bool force_dual_color_blend:1;
    bool coherent_fb_fetch:1;
    bool ignore_sample_mask_out:1;
@@ -619,14 +605,6 @@ struct brw_image_param {
  * Binding table index for the first gfx6 SOL binding.
  */
 #define BRW_GFX6_SOL_BINDING_START 0
-
-/**
- * Stride in bytes between shader_time entries.
- *
- * We separate entries by a cacheline to reduce traffic between EUs writing to
- * different entries.
- */
-#define BRW_SHADER_TIME_STRIDE 64
 
 struct brw_ubo_range
 {
@@ -754,28 +732,9 @@ struct brw_shader_reloc_value {
 };
 
 struct brw_stage_prog_data {
-   struct {
-      /** size of our binding table. */
-      uint32_t size_bytes;
-
-      /** @{
-       * surface indices for the various groups of surfaces
-       */
-      uint32_t pull_constants_start;
-      uint32_t texture_start;
-      uint32_t gather_texture_start;
-      uint32_t ubo_start;
-      uint32_t ssbo_start;
-      uint32_t image_start;
-      uint32_t shader_time_start;
-      uint32_t plane_start[3];
-      /** @} */
-   } binding_table;
-
    struct brw_ubo_range ubo_ranges[4];
 
    GLuint nr_params;       /**< number of float params/constants */
-   GLuint nr_pull_params;
 
    gl_shader_stage stage;
 
@@ -822,7 +781,6 @@ struct brw_stage_prog_data {
     * above.
     */
    uint32_t *param;
-   uint32_t *pull_param;
 
    /* Whether shader uses atomic operations. */
    bool uses_atomic_load_store;
@@ -1587,8 +1545,6 @@ struct brw_compile_vs_params {
    struct brw_vs_prog_data *prog_data;
 
    bool edgeflag_is_last; /* true for gallium */
-   bool shader_time;
-   int shader_time_index;
 
    struct brw_compile_stats *stats;
 
@@ -1622,7 +1578,6 @@ brw_compile_tcs(const struct brw_compiler *compiler,
                 const struct brw_tcs_prog_key *key,
                 struct brw_tcs_prog_data *prog_data,
                 nir_shader *nir,
-                int shader_time_index,
                 struct brw_compile_stats *stats,
                 char **error_str);
 
@@ -1638,7 +1593,6 @@ brw_compile_tes(const struct brw_compiler *compiler, void *log_data,
                 const struct brw_vue_map *input_vue_map,
                 struct brw_tes_prog_data *prog_data,
                 nir_shader *nir,
-                int shader_time_index,
                 struct brw_compile_stats *stats,
                 char **error_str);
 
@@ -1653,7 +1607,6 @@ brw_compile_gs(const struct brw_compiler *compiler, void *log_data,
                const struct brw_gs_prog_key *key,
                struct brw_gs_prog_data *prog_data,
                nir_shader *nir,
-               int shader_time_index,
                struct brw_compile_stats *stats,
                char **error_str);
 
@@ -1738,11 +1691,6 @@ struct brw_compile_fs_params {
    const struct brw_vue_map *vue_map;
    const struct brw_mue_map *mue_map;
 
-   bool shader_time;
-   int shader_time_index8;
-   int shader_time_index16;
-   int shader_time_index32;
-
    bool allow_spilling;
    bool use_rep_send;
 
@@ -1776,9 +1724,6 @@ struct brw_compile_cs_params {
 
    const struct brw_cs_prog_key *key;
    struct brw_cs_prog_data *prog_data;
-
-   bool shader_time;
-   int shader_time_index;
 
    struct brw_compile_stats *stats;
 

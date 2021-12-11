@@ -103,10 +103,8 @@ void
 fs_visitor::nir_setup_uniforms()
 {
    /* Only the first compile gets to set up uniforms. */
-   if (push_constant_loc) {
-      assert(pull_constant_loc);
+   if (push_constant_loc)
       return;
-   }
 
    uniforms = nir->num_uniforms / 4;
 
@@ -973,7 +971,6 @@ void
 fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
                          bool need_dest)
 {
-   struct brw_wm_prog_key *fs_key = (struct brw_wm_prog_key *) this->key;
    fs_inst *inst;
    unsigned execution_mode =
       bld.shader->nir->info.float_controls_execution_mode;
@@ -1230,29 +1227,17 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
       inst = bld.emit(SHADER_OPCODE_COS, result, op[0]);
       break;
 
-   case nir_op_fddx:
-      if (fs_key->high_quality_derivatives) {
-         inst = bld.emit(FS_OPCODE_DDX_FINE, result, op[0]);
-      } else {
-         inst = bld.emit(FS_OPCODE_DDX_COARSE, result, op[0]);
-      }
-      break;
    case nir_op_fddx_fine:
       inst = bld.emit(FS_OPCODE_DDX_FINE, result, op[0]);
       break;
+   case nir_op_fddx:
    case nir_op_fddx_coarse:
       inst = bld.emit(FS_OPCODE_DDX_COARSE, result, op[0]);
-      break;
-   case nir_op_fddy:
-      if (fs_key->high_quality_derivatives) {
-         inst = bld.emit(FS_OPCODE_DDY_FINE, result, op[0]);
-      } else {
-         inst = bld.emit(FS_OPCODE_DDY_COARSE, result, op[0]);
-      }
       break;
    case nir_op_fddy_fine:
       inst = bld.emit(FS_OPCODE_DDY_FINE, result, op[0]);
       break;
+   case nir_op_fddy:
    case nir_op_fddy_coarse:
       inst = bld.emit(FS_OPCODE_DDY_COARSE, result, op[0]);
       break;
@@ -3317,15 +3302,6 @@ fs_visitor::emit_non_coherent_fb_read(const fs_builder &bld, const fs_reg &dst,
    const brw_wm_prog_key *wm_key =
       reinterpret_cast<const brw_wm_prog_key *>(key);
    assert(!wm_key->coherent_fb_fetch);
-   const struct brw_wm_prog_data *wm_prog_data =
-      brw_wm_prog_data(stage_prog_data);
-
-   /* Calculate the surface index relative to the start of the texture binding
-    * table block, since that's what the texturing messages expect.
-    */
-   const unsigned surface = target +
-      wm_prog_data->binding_table.render_target_read_start -
-      wm_prog_data->base.binding_table.texture_start;
 
    /* Calculate the fragment coordinates. */
    const fs_reg coords = bld.vgrf(BRW_REGISTER_TYPE_UD, 3);
@@ -3344,7 +3320,7 @@ fs_visitor::emit_non_coherent_fb_read(const fs_builder &bld, const fs_reg &dst,
 
    const fs_reg sample = nir_system_values[SYSTEM_VALUE_SAMPLE_ID];
    const fs_reg mcs = wm_key->multisample_fbo ?
-      emit_mcs_fetch(coords, 3, brw_imm_ud(surface), fs_reg()) : fs_reg();
+      emit_mcs_fetch(coords, 3, brw_imm_ud(target), fs_reg()) : fs_reg();
 
    /* Use either a normal or a CMS texel fetch message depending on whether
     * the framebuffer is single or multisample.  On SKL+ use the wide CMS
@@ -3375,7 +3351,7 @@ fs_visitor::emit_non_coherent_fb_read(const fs_builder &bld, const fs_reg &dst,
    srcs[TEX_LOGICAL_SRC_LOD]              = brw_imm_ud(0);
    srcs[TEX_LOGICAL_SRC_SAMPLE_INDEX]     = sample;
    srcs[TEX_LOGICAL_SRC_MCS]              = mcs;
-   srcs[TEX_LOGICAL_SRC_SURFACE]          = brw_imm_ud(surface);
+   srcs[TEX_LOGICAL_SRC_SURFACE]          = brw_imm_ud(target);
    srcs[TEX_LOGICAL_SRC_SAMPLER]          = brw_imm_ud(0);
    srcs[TEX_LOGICAL_SRC_COORD_COMPONENTS] = brw_imm_ud(3);
    srcs[TEX_LOGICAL_SRC_GRAD_COMPONENTS]  = brw_imm_ud(0);
@@ -3889,13 +3865,11 @@ fs_visitor::nir_emit_cs_intrinsic(const fs_builder &bld,
 
    case nir_intrinsic_load_num_workgroups: {
       assert(nir_dest_bit_size(instr->dest) == 32);
-      const unsigned surface =
-         cs_prog_data->binding_table.work_groups_start;
 
       cs_prog_data->uses_num_work_groups = true;
 
       fs_reg srcs[SURFACE_LOGICAL_NUM_SRCS];
-      srcs[SURFACE_LOGICAL_SRC_SURFACE] = brw_imm_ud(surface);
+      srcs[SURFACE_LOGICAL_SRC_SURFACE] = brw_imm_ud(0);
       srcs[SURFACE_LOGICAL_SRC_IMM_DIMS] = brw_imm_ud(1);
       srcs[SURFACE_LOGICAL_SRC_IMM_ARG] = brw_imm_ud(3); /* num components */
       srcs[SURFACE_LOGICAL_SRC_ADDRESS] = brw_imm_ud(0);
@@ -4142,17 +4116,6 @@ fs_visitor::get_nir_image_intrinsic_image(const brw::fs_builder &bld,
    fs_reg image = retype(get_nir_src_imm(instr->src[0]), BRW_REGISTER_TYPE_UD);
    fs_reg surf_index = image;
 
-   if (stage_prog_data->binding_table.image_start > 0) {
-      if (image.file == BRW_IMMEDIATE_VALUE) {
-         surf_index =
-            brw_imm_ud(image.d + stage_prog_data->binding_table.image_start);
-      } else {
-         surf_index = vgrf(glsl_type::uint_type);
-         bld.ADD(surf_index, image,
-                 brw_imm_d(stage_prog_data->binding_table.image_start));
-      }
-   }
-
    return bld.emit_uniformize(surf_index);
 }
 
@@ -4167,14 +4130,9 @@ fs_visitor::get_nir_ssbo_intrinsic_index(const brw::fs_builder &bld,
    const unsigned src = is_store ? 1 : 0;
 
    if (nir_src_is_const(instr->src[src])) {
-      unsigned index = stage_prog_data->binding_table.ssbo_start +
-                       nir_src_as_uint(instr->src[src]);
-      return brw_imm_ud(index);
+      return brw_imm_ud(nir_src_as_uint(instr->src[src]));
    } else {
-      fs_reg surf_index = vgrf(glsl_type::uint_type);
-      bld.ADD(surf_index, get_nir_src(instr->src[src]),
-              brw_imm_ud(stage_prog_data->binding_table.ssbo_start));
-      return bld.emit_uniformize(surf_index);
+      return bld.emit_uniformize(get_nir_src(instr->src[src]));
    }
 }
 
@@ -4733,8 +4691,7 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
    case nir_intrinsic_load_ubo: {
       fs_reg surf_index;
       if (nir_src_is_const(instr->src[0])) {
-         const unsigned index = stage_prog_data->binding_table.ubo_start +
-                                nir_src_as_uint(instr->src[0]);
+         const unsigned index = nir_src_as_uint(instr->src[0]);
          surf_index = brw_imm_ud(index);
       } else {
          /* The block index is not a constant. Evaluate the index expression
@@ -4742,8 +4699,7 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
           * from any live channel.
           */
          surf_index = vgrf(glsl_type::uint_type);
-         bld.ADD(surf_index, get_nir_src(instr->src[0]),
-                 brw_imm_ud(stage_prog_data->binding_table.ubo_start));
+         bld.MOV(surf_index, get_nir_src(instr->src[0]));
          surf_index = bld.emit_uniformize(surf_index);
       }
 
@@ -5092,7 +5048,7 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
       /* Set LOD = 0 */
       ubld.MOV(src_payload, brw_imm_d(0));
 
-      const unsigned index = prog_data->binding_table.ssbo_start + ssbo_index;
+      const unsigned index = ssbo_index;
       fs_inst *inst = ubld.emit(SHADER_OPCODE_GET_BUFFER_SIZE, ret_payload,
                                 src_payload, brw_imm_ud(index));
       inst->header_size = 0;
@@ -6190,17 +6146,6 @@ fs_visitor::nir_emit_texture(const fs_builder &bld, nir_tex_instr *instr)
          assert(instr->op == nir_texop_txf_ms);
          srcs[TEX_LOGICAL_SRC_MCS] = retype(src, BRW_REGISTER_TYPE_D);
          break;
-
-      case nir_tex_src_plane: {
-         const uint32_t plane = nir_src_as_uint(instr->src[i].src);
-         const uint32_t texture_index =
-            instr->texture_index +
-            stage_prog_data->binding_table.plane_start[plane] -
-            stage_prog_data->binding_table.texture_start;
-
-         srcs[TEX_LOGICAL_SRC_SURFACE] = brw_imm_ud(texture_index);
-         break;
-      }
 
       default:
          unreachable("unknown texture source");

@@ -90,7 +90,6 @@ iris_finalize_program(struct iris_compiled_shader *shader,
    ralloc_steal(shader, shader->prog_data);
    ralloc_steal(shader->prog_data, (void *)prog_data->relocs);
    ralloc_steal(shader->prog_data, prog_data->param);
-   ralloc_steal(shader->prog_data, prog_data->pull_param);
    ralloc_steal(shader, shader->streamout);
    ralloc_steal(shader, shader->system_values);
 }
@@ -1553,7 +1552,7 @@ iris_compile_tcs(struct iris_screen *screen,
    char *error_str = NULL;
    const unsigned *program =
       brw_compile_tcs(compiler, dbg, mem_ctx, &brw_key, tcs_prog_data,
-                      nir, -1, NULL, &error_str);
+                      nir, NULL, &error_str);
    if (program == NULL) {
       dbg_printf("Failed to compile control shader: %s\n", error_str);
       ralloc_free(mem_ctx);
@@ -1711,7 +1710,7 @@ iris_compile_tes(struct iris_screen *screen,
    char *error_str = NULL;
    const unsigned *program =
       brw_compile_tes(compiler, dbg, mem_ctx, &brw_key, &input_vue_map,
-                      tes_prog_data, nir, -1, NULL, &error_str);
+                      tes_prog_data, nir, NULL, &error_str);
    if (program == NULL) {
       dbg_printf("Failed to compile evaluation shader: %s\n", error_str);
       ralloc_free(mem_ctx);
@@ -1845,7 +1844,7 @@ iris_compile_gs(struct iris_screen *screen,
    char *error_str = NULL;
    const unsigned *program =
       brw_compile_gs(compiler, dbg, mem_ctx, &brw_key, gs_prog_data,
-                     nir, -1, NULL, &error_str);
+                     nir, NULL, &error_str);
    if (program == NULL) {
       dbg_printf("Failed to compile geometry shader: %s\n", error_str);
       ralloc_free(mem_ctx);

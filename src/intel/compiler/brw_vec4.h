@@ -72,7 +72,6 @@ public:
                 const nir_shader *shader,
 		void *mem_ctx,
                 bool no_spills,
-                int shader_time_index,
                 bool debug_enabled);
 
    dst_reg dst_null_f()
@@ -138,9 +137,7 @@ public:
    void spill_reg(unsigned spill_reg);
    void move_grf_array_access_to_scratch();
    void move_uniform_array_access_to_pull_constants();
-   void move_push_constants_to_pull_constants();
    void split_uniform_registers();
-   void pack_uniform_registers();
    void setup_push_ranges();
    virtual void invalidate_analysis(brw::analysis_dependency_class c);
    void split_virtual_grfs();
@@ -280,10 +277,6 @@ public:
    vec4_instruction *emit_generic_urb_slot(dst_reg reg, int varying, int comp);
    virtual void emit_urb_slot(dst_reg reg, int varying);
 
-   void emit_shader_time_begin();
-   void emit_shader_time_end();
-   void emit_shader_time_write(int shader_time_subindex, src_reg value);
-
    src_reg get_scratch_offset(bblock_t *block, vec4_instruction *inst,
 			      src_reg *reladdr, int reg_offset);
    void emit_scratch_read(bblock_t *block, vec4_instruction *inst,
@@ -292,11 +285,6 @@ public:
 			  int base_offset);
    void emit_scratch_write(bblock_t *block, vec4_instruction *inst,
 			   int base_offset);
-   void emit_pull_constant_load(bblock_t *block, vec4_instruction *inst,
-				dst_reg dst,
-				src_reg orig_src,
-                                int base_offset,
-                                src_reg indirect);
    void emit_pull_constant_load_reg(dst_reg dst,
                                     src_reg surf_index,
                                     src_reg offset,
@@ -376,8 +364,6 @@ private:
     * If true, then register allocation should fail instead of spilling.
     */
    const bool no_spills;
-
-   int shader_time_index;
 
    unsigned last_scratch; /**< measured in 32-byte (register size) units */
 };

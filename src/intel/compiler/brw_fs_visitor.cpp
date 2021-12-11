@@ -126,7 +126,6 @@ fs_visitor::emit_dummy_fs()
 
    /* We don't have any uniforms. */
    stage_prog_data->nr_params = 0;
-   stage_prog_data->nr_pull_params = 0;
    stage_prog_data->curb_read_length = 0;
    stage_prog_data->dispatch_grf_start_reg = 2;
    wm_prog_data->dispatch_grf_start_reg_16 = 2;
@@ -1131,7 +1130,6 @@ fs_visitor::fs_visitor(const struct brw_compiler *compiler, void *log_data,
                        struct brw_stage_prog_data *prog_data,
                        const nir_shader *shader,
                        unsigned dispatch_width,
-                       int shader_time_index,
                        bool debug_enabled)
    : backend_shader(compiler, log_data, mem_ctx, shader, prog_data,
                     debug_enabled),
@@ -1139,7 +1137,6 @@ fs_visitor::fs_visitor(const struct brw_compiler *compiler, void *log_data,
      live_analysis(this), regpressure_analysis(this),
      performance_analysis(this),
      dispatch_width(dispatch_width),
-     shader_time_index(shader_time_index),
      bld(fs_builder(this, dispatch_width).at_end())
 {
    init();
@@ -1150,7 +1147,6 @@ fs_visitor::fs_visitor(const struct brw_compiler *compiler, void *log_data,
                        struct brw_gs_compile *c,
                        struct brw_gs_prog_data *prog_data,
                        const nir_shader *shader,
-                       int shader_time_index,
                        bool debug_enabled)
    : backend_shader(compiler, log_data, mem_ctx, shader,
                     &prog_data->base.base, debug_enabled),
@@ -1159,7 +1155,6 @@ fs_visitor::fs_visitor(const struct brw_compiler *compiler, void *log_data,
      live_analysis(this), regpressure_analysis(this),
      performance_analysis(this),
      dispatch_width(8),
-     shader_time_index(shader_time_index),
      bld(fs_builder(this, dispatch_width).at_end())
 {
    init();
@@ -1192,7 +1187,6 @@ fs_visitor::init()
 
    this->uniforms = 0;
    this->last_scratch = 0;
-   this->pull_constant_loc = NULL;
    this->push_constant_loc = NULL;
 
    this->shader_stats.scheduler_mode = NULL;

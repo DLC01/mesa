@@ -2112,6 +2112,12 @@ emit_alu(struct ntd_context *ctx, nir_alu_instr *alu)
    case nir_op_iand: return emit_binop(ctx, alu, DXIL_BINOP_AND, src[0], src[1]);
    case nir_op_ior:  return emit_binop(ctx, alu, DXIL_BINOP_OR, src[0], src[1]);
    case nir_op_ixor: return emit_binop(ctx, alu, DXIL_BINOP_XOR, src[0], src[1]);
+   case nir_op_inot: {
+      unsigned bit_size = alu->dest.dest.ssa.bit_size;
+      intmax_t val = bit_size == 1 ? 1 : -1;
+      const struct dxil_value *negative_one = dxil_module_get_int_const(&ctx->mod, val, bit_size);
+      return emit_binop(ctx, alu, DXIL_BINOP_XOR, src[0], negative_one);
+   }
    case nir_op_ieq:  return emit_cmp(ctx, alu, DXIL_ICMP_EQ, src[0], src[1]);
    case nir_op_ine:  return emit_cmp(ctx, alu, DXIL_ICMP_NE, src[0], src[1]);
    case nir_op_ige:  return emit_cmp(ctx, alu, DXIL_ICMP_SGE, src[0], src[1]);
@@ -4731,7 +4737,6 @@ optimize_nir(struct nir_shader *s, const struct nir_to_dxil_options *opts)
       if (s->options->lower_int64_options)
          NIR_PASS(progress, s, nir_lower_int64);
       NIR_PASS(progress, s, nir_lower_alu);
-      NIR_PASS(progress, s, dxil_nir_lower_inot);
       NIR_PASS(progress, s, nir_opt_constant_folding);
       NIR_PASS(progress, s, nir_opt_undef);
       NIR_PASS(progress, s, nir_lower_undef_to_zero);

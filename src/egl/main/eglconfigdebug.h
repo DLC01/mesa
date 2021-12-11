@@ -1,7 +1,5 @@
 /**************************************************************************
- *
- * Copyright 2008 VMware, Inc.
- * Copyright 2009-2010 Chia-I Wu <olvaffe@gmail.com>
+ * Copyright 2017 Imagination Technologies.
  * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -26,34 +24,24 @@
  *
  **************************************************************************/
 
-
-#ifndef EGLLOG_INCLUDED
-#define EGLLOG_INCLUDED
-
-
-#include "egltypedefs.h"
-
+#ifndef EGLCONFIGDEBUG_INCLUDED
+#define EGLCONFIGDEBUG_INCLUDED
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define _EGL_FATAL   0   /* unrecoverable error */
-#define _EGL_WARNING 1   /* recoverable error/problem */
-#define _EGL_INFO    2   /* just useful info */
-#define _EGL_DEBUG   3   /* useful info for debugging */
+#include "egltypedefs.h"
 
-
-extern EGLint
-_eglGetLogLevel(void);
-
-
-extern void
-_eglLog(EGLint level, const char *fmtStr, ...);
-
+/**
+ * Print the list of configs and the associated attributes.
+ */
+void eglPrintConfigDebug(const _EGLDisplay *const disp,
+                         const EGLConfig *const configs,
+                         EGLint numConfigs, EGLBoolean printChosen);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* EGLLOG_INCLUDED */
+#endif /* EGLCONFIGDEBUG_INCLUDED */
