@@ -691,6 +691,13 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    }
 #endif
 
+#ifdef ANDROID
+   device->emulate_etc2 = !radv_device_supports_etc(device);
+#else
+   device->emulate_etc2 = !radv_device_supports_etc(device) &&
+                          driQueryOptionb(&device->instance->dri_options, "radv_require_etc2");
+#endif
+
    snprintf(device->name, sizeof(device->name), "AMD RADV %s%s", device->rad_info.name,
             radv_get_compiler_string(device));
 
@@ -923,6 +930,7 @@ static const driOptionDescription radv_dri_options[] = {
       DRI_CONF_RADV_DISABLE_TC_COMPAT_HTILE_GENERAL(false)
       DRI_CONF_RADV_DISABLE_DCC(false)
       DRI_CONF_RADV_REPORT_APU_AS_DGPU(false)
+      DRI_CONF_RADV_REQUIRE_ETC2(false)
    DRI_CONF_SECTION_END
 };
 // clang-format on
@@ -1169,7 +1177,7 @@ radv_GetPhysicalDeviceFeatures(VkPhysicalDevice physicalDevice, VkPhysicalDevice
       .alphaToOne = false,
       .multiViewport = true,
       .samplerAnisotropy = true,
-      .textureCompressionETC2 = radv_device_supports_etc(pdevice),
+      .textureCompressionETC2 = radv_device_supports_etc(pdevice) || pdevice->emulate_etc2,
       .textureCompressionASTC_LDR = false,
       .textureCompressionBC = true,
       .occlusionQueryPrecise = true,
@@ -7392,13 +7400,10 @@ radv_init_sampler(struct radv_device *device, struct radv_sampler *sampler,
    sampler->state[3] = (S_008F3C_BORDER_COLOR_PTR(border_color_ptr) |
                         S_008F3C_BORDER_COLOR_TYPE(radv_tex_bordercolor(border_color)));
 
-   if (device->physical_device->rad_info.chip_class >= GFX10) {
-      sampler->state[2] |= S_008F38_ANISO_OVERRIDE_GFX10(1);
-   } else {
+   if (device->physical_device->rad_info.chip_class < GFX10) {
       sampler->state[2] |=
          S_008F38_DISABLE_LSB_CEIL(device->physical_device->rad_info.chip_class <= GFX8) |
-         S_008F38_FILTER_PREC_FIX(1) |
-         S_008F38_ANISO_OVERRIDE_GFX8(device->physical_device->rad_info.chip_class >= GFX8);
+         S_008F38_FILTER_PREC_FIX(1);
    }
 }
 

@@ -939,6 +939,20 @@ iris_alloc_push_constants(struct iris_batch *batch)
          alloc.ConstantBufferSize = i == MESA_SHADER_FRAGMENT ? frag_size : stage_size;
       }
    }
+
+#if GFX_VERx10 == 125
+   /* Wa_22011440098
+    *
+    * In 3D mode, after programming push constant alloc command immediately
+    * program push constant command(ZERO length) without any commit between
+    * them.
+    */
+   if (intel_device_info_is_dg2(devinfo)) {
+      iris_emit_cmd(batch, GENX(3DSTATE_CONSTANT_ALL), c) {
+         c.MOCS = iris_mocs(NULL, &batch->screen->isl_dev, 0);
+      }
+   }
+#endif
 }
 
 #if GFX_VER >= 12
@@ -6105,6 +6119,15 @@ iris_upload_dirty_render_state(struct iris_context *ice,
       }
 
       if ((dirty & IRIS_DIRTY_SO_DECL_LIST) && ice->state.streamout) {
+         /* Wa_16011773973:
+          * If SOL is enabled and SO_DECL state has to be programmed,
+          *    1. Send 3D State SOL state with SOL disabled
+          *    2. Send SO_DECL NP state
+          *    3. Send 3D State SOL with SOL Enabled
+          */
+         if (intel_device_info_is_dg2(&batch->screen->devinfo))
+            iris_emit_cmd(batch, GENX(3DSTATE_STREAMOUT), sol);
+
          uint32_t *decl_list =
             ice->state.streamout + GENX(3DSTATE_STREAMOUT_length);
          iris_batch_emit(batch, decl_list, 4 * ((decl_list[0] & 0xff) + 2));
@@ -6616,6 +6639,9 @@ iris_upload_dirty_render_state(struct iris_context *ice,
             ice->shaders.prog[MESA_SHADER_TESS_EVAL] != NULL ? RR_STRICT :
                                                                RR_FREE;
          vfg.DistributionGranularity = BatchLevelGranularity;
+         /* Wa_14014890652 */
+         if (intel_device_info_is_dg2(&batch->screen->devinfo))
+            vfg.GranularityThresholdDisable = 1;
          vfg.ListCutIndexEnable = draw->primitive_restart;
          /* 192 vertices for TRILIST_ADJ */
          vfg.ListNBatchSizeScale = 0;

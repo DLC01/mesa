@@ -48,9 +48,9 @@
 #include "texstore.h"
 #include "format_utils.h"
 #include "pixeltransfer.h"
+#include "api_exec_decl.h"
 
 #include "state_tracker/st_cb_texture.h"
-#include "state_tracker/st_cb_bufferobjects.h"
 
 /**
  * Can the given type represent negative values?
@@ -710,9 +710,9 @@ _mesa_GetTexSubImage_sw(struct gl_context *ctx,
        * texture data to the PBO if the PBO is in VRAM along with the texture.
        */
       GLubyte *buf = (GLubyte *)
-         st_bufferobj_map_range(ctx, 0, ctx->Pack.BufferObj->Size,
-                                GL_MAP_WRITE_BIT, ctx->Pack.BufferObj,
-                                MAP_INTERNAL);
+         _mesa_bufferobj_map_range(ctx, 0, ctx->Pack.BufferObj->Size,
+                                   GL_MAP_WRITE_BIT, ctx->Pack.BufferObj,
+                                   MAP_INTERNAL);
       if (!buf) {
          /* out of memory or other unexpected error */
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "glGetTexImage(map PBO failed)");
@@ -762,7 +762,7 @@ _mesa_GetTexSubImage_sw(struct gl_context *ctx,
    }
 
    if (ctx->Pack.BufferObj) {
-      st_bufferobj_unmap(ctx, ctx->Pack.BufferObj, MAP_INTERNAL);
+      _mesa_bufferobj_unmap(ctx, ctx->Pack.BufferObj, MAP_INTERNAL);
    }
 }
 
@@ -792,9 +792,9 @@ get_compressed_texsubimage_sw(struct gl_context *ctx,
    if (ctx->Pack.BufferObj) {
       /* pack texture image into a PBO */
       dest = (GLubyte *)
-         st_bufferobj_map_range(ctx, 0, ctx->Pack.BufferObj->Size,
-                                GL_MAP_WRITE_BIT, ctx->Pack.BufferObj,
-                                MAP_INTERNAL);
+         _mesa_bufferobj_map_range(ctx, 0, ctx->Pack.BufferObj->Size,
+                                   GL_MAP_WRITE_BIT, ctx->Pack.BufferObj,
+                                   MAP_INTERNAL);
       if (!dest) {
          /* out of memory or other unexpected error */
          _mesa_error(ctx, GL_OUT_OF_MEMORY,
@@ -837,7 +837,7 @@ get_compressed_texsubimage_sw(struct gl_context *ctx,
    }
 
    if (ctx->Pack.BufferObj) {
-      st_bufferobj_unmap(ctx, ctx->Pack.BufferObj, MAP_INTERNAL);
+      _mesa_bufferobj_unmap(ctx, ctx->Pack.BufferObj, MAP_INTERNAL);
    }
 }
 
@@ -876,7 +876,7 @@ legal_getteximage_target(struct gl_context *ctx, GLenum target, bool dsa)
    case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
    case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
    case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
-      return dsa ? GL_FALSE : ctx->Extensions.ARB_texture_cube_map;
+      return dsa ? GL_FALSE : GL_TRUE;
    case GL_TEXTURE_CUBE_MAP:
       return dsa ? GL_TRUE : GL_FALSE;
    default:

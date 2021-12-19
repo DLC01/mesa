@@ -27,14 +27,12 @@
 
 
 #include "main/accum.h"
-#include "main/api_exec.h"
 #include "main/context.h"
 #include "main/debug_output.h"
 #include "main/glthread.h"
 #include "main/shaderobj.h"
 #include "main/state.h"
 #include "main/version.h"
-#include "main/vtxfmt.h"
 #include "main/hash.h"
 #include "program/prog_cache.h"
 #include "vbo/vbo.h"
@@ -43,7 +41,6 @@
 #include "st_context.h"
 #include "st_debug.h"
 #include "st_cb_bitmap.h"
-#include "st_cb_bufferobjects.h"
 #include "st_cb_clear.h"
 #include "st_cb_compute.h"
 #include "st_cb_condrender.h"
@@ -548,6 +545,7 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
 
    st->options = *options;
 
+   ctx->st_opts = &st->options;
    ctx->st = st;
 
    st->ctx = ctx;
@@ -579,6 +577,7 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
    }
 
    st->cso_context = cso_create_context(pipe, cso_flags);
+   ctx->cso_context = st->cso_context;
 
    st_init_atoms(st);
    st_init_clear(st);
@@ -841,7 +840,6 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
    _vbo_CreateContext(ctx);
 
    _mesa_initialize_dispatch_tables(ctx);
-   _mesa_initialize_vbo_vtxfmt(ctx);
    st_init_driver_flags(st);
 
    /* Initialize context's winsys buffers list */
@@ -919,7 +917,6 @@ st_init_driver_functions(struct pipe_screen *screen,
                          bool has_egl_image_validate)
 {
    st_init_draw_functions(screen, functions);
-   st_init_bufferobject_functions(screen, functions);
 
    st_init_eglimage_functions(functions, has_egl_image_validate);
 
@@ -984,6 +981,7 @@ st_create_context(gl_api api, struct pipe_context *pipe,
       return NULL;
    }
 
+   ctx->pipe = pipe;
    st_debug_init();
 
    if (pipe->screen->get_disk_shader_cache)
@@ -994,6 +992,9 @@ st_create_context(gl_api api, struct pipe_context *pipe,
     */
    if (debug_get_option_mesa_mvp_dp4())
       ctx->Const.ShaderCompilerOptions[MESA_SHADER_VERTEX].OptimizeForAOS = GL_TRUE;
+
+   if (pipe->screen->get_param(pipe->screen, PIPE_CAP_INVALIDATE_BUFFER))
+      ctx->has_invalidate_buffer = true;
 
    st = st_create_context_priv(ctx, pipe, options, no_error);
    if (!st) {
@@ -1060,7 +1061,7 @@ st_destroy_context(struct st_context *st)
    _mesa_make_current(ctx, NULL, NULL);
 
    /* This must be called first so that glthread has a chance to finish */
-   _mesa_glthread_destroy(ctx);
+   _mesa_glthread_destroy(ctx, NULL);
 
    _mesa_HashWalk(ctx->Shared->TexObjects, destroy_tex_sampler_cb, st);
 

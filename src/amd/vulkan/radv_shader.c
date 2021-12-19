@@ -78,9 +78,9 @@ radv_get_nir_options(struct radv_physical_device *device)
       .lower_unpack_unorm_2x16 = true,
       .lower_unpack_unorm_4x8 = true,
       .lower_unpack_half_2x16 = true,
-      .lower_ffma16 = true,
-      .lower_ffma32 = true,
-      .lower_ffma64 = true,
+      .lower_ffma16 = device->rad_info.chip_class < GFX9,
+      .lower_ffma32 = device->rad_info.chip_class < GFX10_3,
+      .lower_ffma64 = false,
       .lower_fpow = true,
       .lower_mul_2x32_64 = true,
       .lower_rotate = true,
@@ -655,6 +655,7 @@ radv_shader_compile_to_nir(struct radv_device *device, struct vk_shader_module *
       .lower_tg4_offsets = true,
       .lower_txs_cube_array = true,
       .lower_to_fragment_fetch_amd = true,
+      .lower_lod_zero_width = true,
    };
 
    nir_lower_tex(nir, &tex_options);

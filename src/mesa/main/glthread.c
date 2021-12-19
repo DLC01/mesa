@@ -110,8 +110,7 @@ _mesa_glthread_init(struct gl_context *ctx)
    _mesa_glthread_reset_vao(&glthread->DefaultVAO);
    glthread->CurrentVAO = &glthread->DefaultVAO;
 
-   ctx->MarshalExec = _mesa_create_marshal_table(ctx);
-   if (!ctx->MarshalExec) {
+   if (!_mesa_create_marshal_tables(ctx)) {
       _mesa_DeleteHashTable(glthread->VAOs);
       util_queue_destroy(&glthread->queue);
       return;
@@ -158,12 +157,15 @@ free_vao(void *data, UNUSED void *userData)
 }
 
 void
-_mesa_glthread_destroy(struct gl_context *ctx)
+_mesa_glthread_destroy(struct gl_context *ctx, const char *reason)
 {
    struct glthread_state *glthread = &ctx->GLThread;
 
    if (!glthread->enabled)
       return;
+
+   if (reason)
+      _mesa_debug(ctx, "glthread destroy reason: %s\n", reason);
 
    _mesa_glthread_finish(ctx);
    util_queue_destroy(&glthread->queue);
@@ -175,33 +177,12 @@ _mesa_glthread_destroy(struct gl_context *ctx)
    _mesa_DeleteHashTable(glthread->VAOs);
 
    ctx->GLThread.enabled = false;
+   ctx->CurrentClientDispatch = ctx->CurrentServerDispatch;
 
-   _mesa_glthread_restore_dispatch(ctx, "destroy");
-}
-
-void
-_mesa_glthread_restore_dispatch(struct gl_context *ctx, const char *func)
-{
-   /* Remove ourselves from the dispatch table except if another ctx/thread
-    * already installed a new dispatch table.
-    *
-    * Typically glxMakeCurrent will bind a new context (install new table) then
-    * old context might be deleted.
-    */
+   /* Update the dispatch only if the context is current. */
    if (_glapi_get_dispatch() == ctx->MarshalExec) {
-       ctx->CurrentClientDispatch = ctx->CurrentServerDispatch;
        _glapi_set_dispatch(ctx->CurrentClientDispatch);
-#if 0
-       printf("glthread disabled: %s\n", func);
-#endif
    }
-}
-
-void
-_mesa_glthread_disable(struct gl_context *ctx, const char *func)
-{
-   _mesa_glthread_finish_before(ctx, func);
-   _mesa_glthread_restore_dispatch(ctx, func);
 }
 
 void
@@ -211,8 +192,13 @@ _mesa_glthread_flush_batch(struct gl_context *ctx)
    if (!glthread->enabled)
       return;
 
-   if (!glthread->used)
+   if (ctx->CurrentServerDispatch == ctx->ContextLost) {
+      _mesa_glthread_destroy(ctx, "context lost");
       return;
+   }
+
+   if (!glthread->used)
+      return; /* the batch is empty */
 
    /* Pin threads regularly to the same Zen CCX that the main thread is
     * running on. The main thread can move between CCXs.

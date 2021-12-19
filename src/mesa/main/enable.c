@@ -43,6 +43,7 @@
 #include "state.h"
 #include "texstate.h"
 #include "varray.h"
+#include "api_exec_decl.h"
 
 #include "state_tracker/st_context.h"
 
@@ -990,8 +991,7 @@ _mesa_set_enable(struct gl_context *ctx, GLenum cap, GLboolean state)
 
       /* GL_ARB_texture_cube_map */
       case GL_TEXTURE_CUBE_MAP:
-         if (!_mesa_has_ARB_texture_cube_map(ctx) &&
-             !_mesa_has_OES_texture_cube_map(ctx))
+         if (ctx->API != API_OPENGL_COMPAT && ctx->API != API_OPENGLES)
             goto invalid_enum_error;
          if (!enable_texture(ctx, state, TEXTURE_CUBE_BIT)) {
             return;
@@ -1830,8 +1830,7 @@ _mesa_IsEnabled( GLenum cap )
 
       /* GL_ARB_texture_cube_map */
       case GL_TEXTURE_CUBE_MAP:
-         if (!_mesa_has_ARB_texture_cube_map(ctx) &&
-             !_mesa_has_OES_texture_cube_map(ctx))
+         if (ctx->API != API_OPENGL_COMPAT && ctx->API != API_OPENGLES)
             goto invalid_enum_error;
          return is_texture_enabled(ctx, TEXTURE_CUBE_BIT);
 

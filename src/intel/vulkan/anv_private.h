@@ -3172,9 +3172,10 @@ vk_sync_is_anv_bo_sync(const struct vk_sync *sync)
    return sync->type == &anv_bo_sync_type;
 }
 
-VkResult anv_sync_create_for_bo(struct anv_device *device,
-                                struct anv_bo *bo,
-                                struct vk_sync **sync_out);
+VkResult anv_create_sync_for_memory(struct vk_device *device,
+                                    VkDeviceMemory memory,
+                                    bool signal_memory,
+                                    struct vk_sync **sync_out);
 
 struct anv_event {
    struct vk_object_base                        base;
@@ -3347,7 +3348,6 @@ struct anv_graphics_pipeline {
    bool                                         stencil_test_enable;
    bool                                         depth_clamp_enable;
    bool                                         depth_clip_enable;
-   bool                                         sample_shading_enable;
    bool                                         kill_pixel;
    bool                                         depth_bounds_test_enable;
    bool                                         force_fragment_thread_dispatch;

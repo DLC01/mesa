@@ -951,7 +951,7 @@ static void *si_create_rs_state(struct pipe_context *ctx, const struct pipe_rast
                                : 0;
    /* TODO: implement line stippling with perpendicular end caps. */
    /* Line width > 2 is an internal recommendation. */
-   rs->perpendicular_end_caps = (state->multisample || state->line_smooth) &&
+   rs->perpendicular_end_caps = state->multisample &&
                                 state->line_width > 2 && !state->line_stipple_enable;
 
    rs->pa_cl_clip_cntl = S_028810_DX_CLIP_SPACE_DEF(state->clip_halfz) |
@@ -3320,8 +3320,6 @@ static void si_emit_framebuffer_state(struct si_context *sctx)
          if (tex->db_render_format == PIPE_FORMAT_Z16_UNORM && tex->buffer.b.b.nr_samples > 1)
             max_zplanes = 2;
 
-         db_z_info |= S_028038_DECOMPRESS_ON_N_ZPLANES(max_zplanes + 1);
-
          if (sctx->chip_class >= GFX10) {
             bool iterate256 = tex->buffer.b.b.nr_samples >= 2;
             db_z_info |= S_028040_ITERATE_FLUSH(1) |
@@ -3338,6 +3336,8 @@ static void si_emit_framebuffer_state(struct si_context *sctx)
             db_z_info |= S_028038_ITERATE_FLUSH(1);
             db_stencil_info |= S_02803C_ITERATE_FLUSH(1);
          }
+
+         db_z_info |= S_028038_DECOMPRESS_ON_N_ZPLANES(max_zplanes + 1);
       }
 
       unsigned level = zb->base.u.tex.level;

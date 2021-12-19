@@ -3078,6 +3078,9 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
    enum gl_access_qualifier access = 0;
    vtn_foreach_decoration(b, sampled_val, non_uniform_decoration_cb, &access);
 
+   if (operands & SpvImageOperandsNontemporalMask)
+      access |= ACCESS_STREAM_CACHE_POLICY;
+
    if (sampled_val->propagated_non_uniform)
       access |= ACCESS_NON_UNIFORM;
 
@@ -3329,6 +3332,8 @@ vtn_handle_image(struct vtn_builder *b, SpvOp opcode,
 
       if (operands & SpvImageOperandsVolatileTexelMask)
          access |= ACCESS_VOLATILE;
+      if (operands & SpvImageOperandsNontemporalMask)
+         access |= ACCESS_STREAM_CACHE_POLICY;
 
       break;
    }
@@ -3369,6 +3374,8 @@ vtn_handle_image(struct vtn_builder *b, SpvOp opcode,
 
       if (operands & SpvImageOperandsVolatileTexelMask)
          access |= ACCESS_VOLATILE;
+      if (operands & SpvImageOperandsNontemporalMask)
+         access |= ACCESS_STREAM_CACHE_POLICY;
 
       break;
    }
@@ -4451,10 +4458,10 @@ vtn_handle_preamble_instruction(struct vtn_builder *b, SpvOp opcode,
       case SpvCapabilityImageGatherExtended:
       case SpvCapabilityStorageImageExtendedFormats:
       case SpvCapabilityVector16:
-      case SpvCapabilityDotProductKHR:
-      case SpvCapabilityDotProductInputAllKHR:
-      case SpvCapabilityDotProductInput4x8BitKHR:
-      case SpvCapabilityDotProductInput4x8BitPackedKHR:
+      case SpvCapabilityDotProduct:
+      case SpvCapabilityDotProductInputAll:
+      case SpvCapabilityDotProductInput4x8Bit:
+      case SpvCapabilityDotProductInput4x8BitPacked:
          break;
 
       case SpvCapabilityLinkage:
@@ -4695,7 +4702,7 @@ vtn_handle_preamble_instruction(struct vtn_builder *b, SpvOp opcode,
          spv_check_supported(fragment_shader_pixel_interlock, cap);
          break;
 
-      case SpvCapabilityDemoteToHelperInvocationEXT:
+      case SpvCapabilityDemoteToHelperInvocation:
          spv_check_supported(demote_to_helper_invocation, cap);
          b->uses_demote_to_helper_invocation = true;
          break;
@@ -6113,7 +6120,7 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
       nir_end_invocation_interlock(&b->nb);
       break;
 
-   case SpvOpDemoteToHelperInvocationEXT: {
+   case SpvOpDemoteToHelperInvocation: {
       nir_demote(&b->nb);
       break;
    }

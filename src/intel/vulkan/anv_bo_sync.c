@@ -213,20 +213,23 @@ const struct vk_sync_type anv_bo_sync_type = {
 };
 
 VkResult
-anv_sync_create_for_bo(struct anv_device *device,
-                       struct anv_bo *bo,
-                       struct vk_sync **sync_out)
+anv_create_sync_for_memory(struct vk_device *device,
+                           VkDeviceMemory memory,
+                           bool signal_memory,
+                           struct vk_sync **sync_out)
 {
+   ANV_FROM_HANDLE(anv_device_memory, mem, memory);
    struct anv_bo_sync *bo_sync;
 
-   bo_sync = vk_zalloc(&device->vk.alloc, sizeof(*bo_sync), 8,
+   bo_sync = vk_zalloc(&device->alloc, sizeof(*bo_sync), 8,
                        VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
    if (bo_sync == NULL)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    bo_sync->sync.type = &anv_bo_sync_type;
-   bo_sync->state = ANV_BO_SYNC_STATE_SUBMITTED;
-   bo_sync->bo = anv_bo_ref(bo);
+   bo_sync->state = signal_memory ? ANV_BO_SYNC_STATE_RESET :
+                                    ANV_BO_SYNC_STATE_SUBMITTED;
+   bo_sync->bo = anv_bo_ref(mem->bo);
 
    *sync_out = &bo_sync->sync;
 

@@ -31,7 +31,6 @@
 #include "state_tracker/st_context.h"
 #include "state_tracker/st_nir.h"
 #include "state_tracker/st_pbo.h"
-#include "state_tracker/st_cb_bufferobjects.h"
 
 #include "main/context.h"
 #include "pipe/p_context.h"
@@ -107,7 +106,7 @@ st_pbo_addresses_pixelstore(struct st_context *st,
                             const void *pixels,
                             struct st_pbo_addresses *addr)
 {
-   struct pipe_resource *buf = st_buffer_object(store->BufferObj)->buffer;
+   struct pipe_resource *buf = store->BufferObj->buffer;
    intptr_t buf_offset = (intptr_t) pixels;
 
    if (buf_offset % addr->bytes_per_pixel)

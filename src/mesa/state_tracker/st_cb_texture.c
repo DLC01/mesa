@@ -55,7 +55,6 @@
 #include "state_tracker/st_cb_fbo.h"
 #include "state_tracker/st_cb_flush.h"
 #include "state_tracker/st_cb_texture.h"
-#include "state_tracker/st_cb_bufferobjects.h"
 #include "state_tracker/st_cb_memoryobjects.h"
 #include "state_tracker/st_format.h"
 #include "state_tracker/st_pbo.h"
@@ -569,7 +568,7 @@ st_MapTextureImage(struct gl_context *ctx,
                     GL_MAP_INVALIDATE_RANGE_BIT)) == 0);
 
    const enum pipe_map_flags transfer_flags =
-      st_access_flags_to_transfer_flags(mode, false);
+      _mesa_access_flags_to_transfer_flags(mode, false);
 
    map = st_texture_image_map(st, stImage, transfer_flags, x, y, slice, w, h, 1,
                               &transfer);
@@ -2373,7 +2372,7 @@ st_CompressedTexSubImage(struct gl_context *ctx, GLuint dims,
 
    buf_offset = buf_offset / addr.bytes_per_pixel;
 
-   buf = st_buffer_object(ctx->Unpack.BufferObj)->buffer;
+   buf = ctx->Unpack.BufferObj->buffer;
 
    addr.xoffset = x / bw;
    addr.yoffset = y / bh;

@@ -55,6 +55,7 @@
 #include "util/mesa-sha1.h"
 #include "vbo/vbo.h"
 
+#include "pipe/p_state.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -1397,6 +1398,26 @@ struct gl_buffer_object
    bool MinMaxCacheDirty;
 
    bool HandleAllocated; /**< GL_ARB_bindless_texture */
+
+   struct pipe_resource *buffer;
+   struct gl_context *private_refcount_ctx;
+   /* This mechanism allows passing buffer references to the driver without
+    * using atomics to increase the reference count.
+    *
+    * This private refcount can be decremented without atomics but only one
+    * context (ctx above) can use this counter to be thread-safe.
+    *
+    * This number is atomically added to buffer->reference.count at
+    * initialization. If it's never used, the same number is atomically
+    * subtracted from buffer->reference.count before destruction. If this
+    * number is decremented, we can pass that reference to the driver without
+    * touching reference.count. At buffer destruction we only subtract
+    * the number of references we did not return. This can possibly turn
+    * a million atomic increments into 1 add and 1 subtract atomic op.
+    */
+   int private_refcount;
+
+   struct pipe_transfer *transfer[MAP_COUNT];
 };
 
 
@@ -4423,17 +4444,13 @@ struct gl_extensions
    GLboolean ARB_spirv_extensions;
    GLboolean ARB_sync;
    GLboolean ARB_tessellation_shader;
-   GLboolean ARB_texture_border_clamp;
    GLboolean ARB_texture_buffer_object;
    GLboolean ARB_texture_buffer_object_rgb32;
    GLboolean ARB_texture_buffer_range;
    GLboolean ARB_texture_compression_bptc;
    GLboolean ARB_texture_compression_rgtc;
-   GLboolean ARB_texture_cube_map;
    GLboolean ARB_texture_cube_map_array;
-   GLboolean ARB_texture_env_combine;
    GLboolean ARB_texture_env_crossbar;
-   GLboolean ARB_texture_env_dot3;
    GLboolean ARB_texture_filter_anisotropic;
    GLboolean ARB_texture_filter_minmax;
    GLboolean ARB_texture_float;
@@ -4747,8 +4764,6 @@ struct gl_dlist_state
    GLuint CurrentPos;		/**< Index into current block of nodes */
    GLuint CallDepth;		/**< Current recursion calling depth */
    GLuint LastInstSize;         /**< Size of the last node. */
-
-   GLvertexformat ListVtxfmt;
 
    GLubyte ActiveAttribSize[VERT_ATTRIB_MAX];
    uint32_t CurrentAttrib[VERT_ATTRIB_MAX][8];
@@ -5218,8 +5233,7 @@ struct gl_context
    struct _glapi_table *Save;
    /**
     * The dispatch table used between glBegin() and glEnd() (outside of a
-    * display list).  Only valid functions between those two are set, which is
-    * mostly just the set in a GLvertexformat struct.
+    * display list).  Only valid functions between those two are set.
     */
    struct _glapi_table *BeginEnd;
    /**
@@ -5228,8 +5242,7 @@ struct gl_context
    struct _glapi_table *ContextLost;
    /**
     * Dispatch table used to marshal API calls from the client program to a
-    * separate server thread.  NULL if API calls are not being marshalled to
-    * another thread.
+    * separate server thread.
     */
    struct _glapi_table *MarshalExec;
    /**
@@ -5557,6 +5570,10 @@ struct gl_context
    /*@{*/
    struct vbo_context vbo_context;
    struct st_context *st;
+   struct pipe_context *pipe;
+   struct st_config_options *st_opts;
+   struct cso_context *cso_context;
+   bool has_invalidate_buffer;
    /*@}*/
 
    /**

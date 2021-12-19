@@ -29,7 +29,6 @@
 #include "st_atom.h"
 #include "st_context.h"
 #include "st_cb_bitmap.h"
-#include "st_cb_bufferobjects.h"
 #include "st_cb_compute.h"
 #include "st_util.h"
 
@@ -81,7 +80,7 @@ void st_dispatch_compute_indirect(struct gl_context *ctx,
                                   GLintptr indirect_offset)
 {
    struct gl_buffer_object *indirect_buffer = ctx->DispatchIndirectBuffer;
-   struct pipe_resource *indirect = st_buffer_object(indirect_buffer)->buffer;
+   struct pipe_resource *indirect = indirect_buffer->buffer;
 
    st_dispatch_compute_common(ctx, NULL, NULL, indirect, indirect_offset);
 }

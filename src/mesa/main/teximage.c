@@ -56,6 +56,7 @@
 #include "glformats.h"
 #include "texstore.h"
 #include "pbo.h"
+#include "api_exec_decl.h"
 
 #include "state_tracker/st_cb_texture.h"
 #include "state_tracker/st_format.h"
@@ -501,8 +502,7 @@ _mesa_max_texture_levels(const struct gl_context *ctx, GLenum target)
    case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
    case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
    case GL_PROXY_TEXTURE_CUBE_MAP:
-      return ctx->Extensions.ARB_texture_cube_map
-         ? ctx->Const.MaxCubeTextureLevels : 0;
+      return ctx->Const.MaxCubeTextureLevels;
    case GL_TEXTURE_RECTANGLE_NV:
    case GL_PROXY_TEXTURE_RECTANGLE_NV:
       return ctx->Extensions.NV_texture_rectangle ? 1 : 0;
@@ -1399,7 +1399,7 @@ _mesa_target_can_be_compressed(const struct gl_context *ctx, GLenum target,
    case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
    case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
    case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
-      target_can_be_compresed = ctx->Extensions.ARB_texture_cube_map;
+      target_can_be_compresed = GL_TRUE;
       break;
    case GL_PROXY_TEXTURE_2D_ARRAY_EXT:
    case GL_TEXTURE_2D_ARRAY_EXT:
@@ -1521,15 +1521,14 @@ legal_teximage_target(struct gl_context *ctx, GLuint dims, GLenum target)
       case GL_PROXY_TEXTURE_2D:
          return _mesa_is_desktop_gl(ctx);
       case GL_PROXY_TEXTURE_CUBE_MAP:
-         return _mesa_is_desktop_gl(ctx)
-            && ctx->Extensions.ARB_texture_cube_map;
+         return _mesa_is_desktop_gl(ctx);
       case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
       case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
       case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
       case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
       case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
       case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
-         return ctx->Extensions.ARB_texture_cube_map;
+         return GL_TRUE;
       case GL_TEXTURE_RECTANGLE_NV:
       case GL_PROXY_TEXTURE_RECTANGLE_NV:
          return _mesa_is_desktop_gl(ctx)
@@ -1587,7 +1586,7 @@ legal_texsubimage_target(struct gl_context *ctx, GLuint dims, GLenum target,
       case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
       case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
       case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
-         return ctx->Extensions.ARB_texture_cube_map;
+         return GL_TRUE;
       case GL_TEXTURE_RECTANGLE_NV:
          return _mesa_is_desktop_gl(ctx)
             && ctx->Extensions.NV_texture_rectangle;
@@ -3346,17 +3345,6 @@ _mesa_MultiTexImage3DEXT(GLenum texunit, GLenum target, GLint level,
       return;
    teximage(ctx, GL_FALSE, 3, texObj, target, level, internalFormat,
                 width, height, depth, border, format, type, 0, pixels, false);
-}
-
-
-void GLAPIENTRY
-_mesa_TexImage3DEXT( GLenum target, GLint level, GLenum internalFormat,
-                     GLsizei width, GLsizei height, GLsizei depth,
-                     GLint border, GLenum format, GLenum type,
-                     const GLvoid *pixels )
-{
-   _mesa_TexImage3D(target, level, (GLint) internalFormat, width, height,
-                    depth, border, format, type, pixels);
 }
 
 
@@ -5277,7 +5265,7 @@ compressed_subtexture_target_check(struct gl_context *ctx, GLenum target,
       case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
       case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
       case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
-         targetOK = ctx->Extensions.ARB_texture_cube_map;
+         targetOK = GL_TRUE;
          break;
       default:
          targetOK = GL_FALSE;
@@ -5287,7 +5275,7 @@ compressed_subtexture_target_check(struct gl_context *ctx, GLenum target,
    case 3:
       switch (target) {
       case GL_TEXTURE_CUBE_MAP:
-         targetOK = dsa && ctx->Extensions.ARB_texture_cube_map;
+         targetOK = dsa;
          break;
       case GL_TEXTURE_2D_ARRAY:
          targetOK = _mesa_is_gles3(ctx) ||

@@ -28,7 +28,6 @@
 #include "main/errors.h"
 #include "main/bufferobj.h"
 #include "math/m_eval.h"
-#include "main/vtxfmt.h"
 #include "main/api_arrayelt.h"
 #include "main/arrayobj.h"
 #include "main/varray.h"
@@ -137,15 +136,6 @@ init_mat_currval(struct gl_context *ctx)
 
       init_array(ctx, attrib, size, ctx->Light.Material.Attrib[i]);
    }
-}
-
-
-void
-_vbo_install_exec_vtxfmt(struct gl_context *ctx)
-{
-   struct vbo_context *vbo = vbo_context(ctx);
-
-   _mesa_install_exec_vtxfmt(ctx, &vbo->exec.vtxfmt);
 }
 
 

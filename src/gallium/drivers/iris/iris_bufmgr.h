@@ -137,6 +137,15 @@ enum iris_mmap_mode {
    IRIS_MMAP_WB, /**< Write-back mapping with CPU caches enabled */
 };
 
+enum iris_heap {
+   IRIS_HEAP_SYSTEM_MEMORY,
+   IRIS_HEAP_DEVICE_LOCAL,
+   IRIS_HEAP_DEVICE_LOCAL_PREFERRED,
+   IRIS_HEAP_MAX,
+};
+
+extern const char *iris_heap_to_string[];
+
 #define IRIS_BATCH_COUNT 2
 
 struct iris_bo_screen_deps {
@@ -244,6 +253,9 @@ struct iris_bo {
          /** The mmap coherency mode selected at BO allocation time */
          enum iris_mmap_mode mmap_mode;
 
+         /** The heap selected at BO allocation time */
+         enum iris_heap heap;
+
          /** Was this buffer imported from an external client? */
          bool imported;
 
@@ -255,9 +267,6 @@ struct iris_bo {
 
          /** Boolean of whether this buffer points into user memory */
          bool userptr;
-
-         /** Boolean of whether this was allocated from local memory */
-         bool local;
       } real;
       struct {
          struct pb_slab_entry entry;
@@ -271,6 +280,7 @@ struct iris_bo {
 #define BO_ALLOC_SMEM        (1<<2)
 #define BO_ALLOC_SCANOUT     (1<<3)
 #define BO_ALLOC_NO_SUBALLOC (1<<4)
+#define BO_ALLOC_LMEM        (1<<5)
 
 /**
  * Allocate a buffer object.

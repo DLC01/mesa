@@ -4372,14 +4372,9 @@ radv_ResetCommandBuffer(VkCommandBuffer commandBuffer, VkCommandBufferResetFlags
 
 static void
 radv_inherit_dynamic_rendering(struct radv_cmd_buffer *cmd_buffer,
-                               const VkCommandBufferInheritanceInfo *inherit_info)
+                               const VkCommandBufferInheritanceInfo *inherit_info,
+                               const VkCommandBufferInheritanceRenderingInfoKHR *dyn_info)
 {
-   const VkCommandBufferInheritanceRenderingInfoKHR *dyn_info =
-      vk_find_struct_const(inherit_info->pNext, COMMAND_BUFFER_INHERITANCE_RENDERING_INFO_KHR);
-
-   if (!dyn_info)
-      return;
-
    const VkAttachmentSampleCountInfoAMD *sample_info =
       vk_find_struct_const(inherit_info->pNext, ATTACHMENT_SAMPLE_COUNT_INFO_AMD);
    VkResult result;
@@ -4503,16 +4498,27 @@ radv_BeginCommandBuffer(VkCommandBuffer commandBuffer, const VkCommandBufferBegi
 
    if (cmd_buffer->level == VK_COMMAND_BUFFER_LEVEL_SECONDARY &&
        (pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT)) {
+      struct radv_subpass *subpass = NULL;
+
       assert(pBeginInfo->pInheritanceInfo);
+
       cmd_buffer->state.framebuffer =
          radv_framebuffer_from_handle(pBeginInfo->pInheritanceInfo->framebuffer);
-      cmd_buffer->state.pass =
-         radv_render_pass_from_handle(pBeginInfo->pInheritanceInfo->renderPass);
 
-      radv_inherit_dynamic_rendering(cmd_buffer, pBeginInfo->pInheritanceInfo);
-
-      struct radv_subpass *subpass =
-         &cmd_buffer->state.pass->subpasses[pBeginInfo->pInheritanceInfo->subpass];
+      if (pBeginInfo->pInheritanceInfo->renderPass) {
+         cmd_buffer->state.pass =
+            radv_render_pass_from_handle(pBeginInfo->pInheritanceInfo->renderPass);
+         assert(pBeginInfo->pInheritanceInfo->subpass < cmd_buffer->state.pass->subpass_count);
+         subpass = &cmd_buffer->state.pass->subpasses[pBeginInfo->pInheritanceInfo->subpass];
+      } else {
+         const VkCommandBufferInheritanceRenderingInfoKHR *dyn_info =
+            vk_find_struct_const(pBeginInfo->pInheritanceInfo->pNext,
+                                 COMMAND_BUFFER_INHERITANCE_RENDERING_INFO_KHR);
+         if (dyn_info) {
+            radv_inherit_dynamic_rendering(cmd_buffer, pBeginInfo->pInheritanceInfo, dyn_info);
+            subpass = &cmd_buffer->state.pass->subpasses[0];
+         }
+      }
 
       if (cmd_buffer->state.framebuffer) {
          result = radv_cmd_state_setup_attachments(cmd_buffer, cmd_buffer->state.pass, NULL, NULL);
@@ -7682,8 +7688,8 @@ radv_CmdBeginRenderingKHR(VkCommandBuffer commandBuffer, const VkRenderingInfoKH
       return;
    }
 
-   unsigned w = MAX_FRAMEBUFFER_WIDTH;
-   unsigned h = MAX_FRAMEBUFFER_HEIGHT;
+   unsigned w = pRenderingInfo->renderArea.offset.x + pRenderingInfo->renderArea.extent.width;
+   unsigned h = pRenderingInfo->renderArea.offset.y + pRenderingInfo->renderArea.extent.height;
    for (unsigned i = 0; i < att_count; ++i) {
       RADV_FROM_HANDLE(radv_image_view, iview, iviews[i]);
       w = MIN2(w, iview->extent.width);

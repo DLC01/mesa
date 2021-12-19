@@ -532,13 +532,51 @@ radv_patch_image_from_extra_info(struct radv_device *device, struct radv_image *
    return VK_SUCCESS;
 }
 
+static VkFormat
+etc2_emulation_format(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+   case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
+   case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
+      return VK_FORMAT_R8G8B8A8_UNORM;
+   case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
+   case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
+   case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
+      return VK_FORMAT_R8G8B8A8_SRGB;
+   case VK_FORMAT_EAC_R11_UNORM_BLOCK:
+      return VK_FORMAT_R16_UNORM;
+   case VK_FORMAT_EAC_R11_SNORM_BLOCK:
+      return VK_FORMAT_R16_SNORM;
+   case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
+      return VK_FORMAT_R16G16_UNORM;
+   case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
+      return VK_FORMAT_R16G16_SNORM;
+   default:
+      unreachable("Unhandled ETC format");
+   }
+}
+
+static VkFormat
+radv_image_get_plane_format(const struct radv_physical_device *pdev, const struct radv_image *image,
+                            unsigned plane)
+{
+   if (pdev->emulate_etc2 &&
+       vk_format_description(image->vk_format)->layout == UTIL_FORMAT_LAYOUT_ETC) {
+      if (plane == 0)
+         return image->vk_format;
+      return etc2_emulation_format(image->vk_format);
+   }
+   return vk_format_get_plane_format(image->vk_format, plane);
+}
+
 static uint64_t
 radv_get_surface_flags(struct radv_device *device, struct radv_image *image, unsigned plane_id,
                        const VkImageCreateInfo *pCreateInfo, VkFormat image_format)
 {
    uint64_t flags;
    unsigned array_mode = radv_choose_tiling(device, pCreateInfo, image_format);
-   VkFormat format = vk_format_get_plane_format(image_format, plane_id);
+   VkFormat format = radv_image_get_plane_format(device->physical_device, image, plane_id);
    const struct util_format_description *desc = vk_format_description(format);
    bool is_depth, is_stencil;
 
@@ -918,6 +956,18 @@ gfx10_make_texture_descriptor(struct radv_device *device, struct radv_image *ima
    unsigned type;
 
    desc = vk_format_description(vk_format);
+
+   /* For emulated ETC2 without alpha we need to override the format to a 3-componenent format, so
+    * that border colors work correctly (alpha forced to 1). Since Vulkan has no such format,
+    * this uses the Gallium formats to set the description. */
+   if (image->vk_format == VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK &&
+       vk_format == VK_FORMAT_R8G8B8A8_UNORM) {
+      desc = util_format_description(PIPE_FORMAT_R8G8B8X8_UNORM);
+   } else if (image->vk_format == VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK &&
+              vk_format == VK_FORMAT_R8G8B8A8_SRGB) {
+      desc = util_format_description(PIPE_FORMAT_R8G8B8X8_SRGB);
+   }
+
    img_format = gfx10_format_table[vk_format_to_pipe_format(vk_format)].img_format;
 
    radv_compose_swizzle(desc, mapping, swizzle);
@@ -1041,6 +1091,17 @@ si_make_texture_descriptor(struct radv_device *device, struct radv_image *image,
 
    desc = vk_format_description(vk_format);
 
+   /* For emulated ETC2 without alpha we need to override the format to a 3-componenent format, so
+    * that border colors work correctly (alpha forced to 1). Since Vulkan has no such format,
+    * this uses the Gallium formats to set the description. */
+   if (image->vk_format == VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK &&
+       vk_format == VK_FORMAT_R8G8B8A8_UNORM) {
+      desc = util_format_description(PIPE_FORMAT_R8G8B8X8_UNORM);
+   } else if (image->vk_format == VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK &&
+              vk_format == VK_FORMAT_R8G8B8A8_SRGB) {
+      desc = util_format_description(PIPE_FORMAT_R8G8B8X8_SRGB);
+   }
+
    radv_compose_swizzle(desc, mapping, swizzle);
 
    first_non_void = vk_format_get_first_non_void_channel(vk_format);
@@ -1114,16 +1175,6 @@ si_make_texture_descriptor(struct radv_device *device, struct radv_image *image,
    if (!(image->planes[0].surface.flags & RADEON_SURF_Z_OR_SBUFFER) &&
        image->planes[0].surface.meta_offset) {
       state[6] = S_008F28_ALPHA_IS_ON_MSB(vi_alpha_is_on_msb(device, vk_format));
-   } else {
-      /* The last dword is unused by hw. The shader uses it to clear
-       * bits in the first dword of sampler state.
-       */
-      if (device->physical_device->rad_info.chip_class <= GFX7 && image->info.samples <= 1) {
-         if (first_level == last_level)
-            state[7] = C_008F30_MAX_ANISO_RATIO;
-         else
-            state[7] = 0xffffffff;
-      }
    }
 
    /* Initialize the sampler view for FMASK. */
@@ -1369,7 +1420,7 @@ radv_image_is_pipe_misaligned(const struct radv_device *device, const struct rad
    assert(rad_info->chip_class >= GFX10);
 
    for (unsigned i = 0; i < image->plane_count; ++i) {
-      VkFormat fmt = vk_format_get_plane_format(image->vk_format, i);
+      VkFormat fmt = radv_image_get_plane_format(device->physical_device, image, i);
       int log2_bpp = util_logbase2(vk_format_get_blocksize(fmt));
       int log2_bpp_and_samples;
 
@@ -1484,8 +1535,16 @@ radv_image_use_comp_to_single(const struct radv_device *device, const struct rad
    return true;
 }
 
+static unsigned
+radv_get_internal_plane_count(const struct radv_physical_device *pdev, VkFormat fmt)
+{
+   if (pdev->emulate_etc2 && vk_format_description(fmt)->layout == UTIL_FORMAT_LAYOUT_ETC)
+      return 2;
+   return vk_format_get_plane_count(fmt);
+}
+
 static void
-radv_image_reset_layout(struct radv_image *image)
+radv_image_reset_layout(const struct radv_physical_device *pdev, struct radv_image *image)
 {
    image->size = 0;
    image->alignment = 1;
@@ -1494,8 +1553,9 @@ radv_image_reset_layout(struct radv_image *image)
    image->fce_pred_offset = image->dcc_pred_offset = 0;
    image->clear_value_offset = image->tc_compat_zrange_offset = 0;
 
-   for (unsigned i = 0; i < image->plane_count; ++i) {
-      VkFormat format = vk_format_get_plane_format(image->vk_format, i);
+   unsigned plane_count = radv_get_internal_plane_count(pdev, image->vk_format);
+   for (unsigned i = 0; i < plane_count; ++i) {
+      VkFormat format = radv_image_get_plane_format(pdev, image, i);
       if (vk_format_has_depth(format))
          format = vk_format_depth_only(format);
 
@@ -1532,9 +1592,10 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
 
    assert(!mod_info || mod_info->drmFormatModifierPlaneCount >= image->plane_count);
 
-   radv_image_reset_layout(image);
+   radv_image_reset_layout(device->physical_device, image);
 
-   for (unsigned plane = 0; plane < image->plane_count; ++plane) {
+   unsigned plane_count = radv_get_internal_plane_count(device->physical_device, image->vk_format);
+   for (unsigned plane = 0; plane < plane_count; ++plane) {
       struct ac_surf_info info = image_info;
       uint64_t offset;
       unsigned stride;
@@ -1542,7 +1603,7 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
       info.width = vk_format_get_plane_width(image->vk_format, plane, info.width);
       info.height = vk_format_get_plane_height(image->vk_format, plane, info.height);
 
-      if (create_info.no_metadata_planes || image->plane_count > 1) {
+      if (create_info.no_metadata_planes || plane_count > 1) {
          image->planes[plane].surface.flags |=
             RADEON_SURF_DISABLE_DCC | RADEON_SURF_NO_FMASK | RADEON_SURF_NO_HTILE;
       }
@@ -1561,7 +1622,7 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
                                        create_info.bo_metadata->metadata))
          return VK_ERROR_INVALID_EXTERNAL_HANDLE;
 
-      if (!create_info.no_metadata_planes && !create_info.bo_metadata && image->plane_count == 1 &&
+      if (!create_info.no_metadata_planes && !create_info.bo_metadata && plane_count == 1 &&
           !mod_info)
          radv_image_alloc_single_sample_cmask(device, image, &image->planes[plane].surface);
 
@@ -1583,7 +1644,7 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
          return VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
 
       /* Validate DCC offsets in modifier layout. */
-      if (image->plane_count == 1 && mod_info) {
+      if (plane_count == 1 && mod_info) {
          unsigned mem_planes = ac_surface_get_nplanes(&image->planes[plane].surface);
          if (mod_info->drmFormatModifierPlaneCount != mem_planes)
             return VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
@@ -1599,7 +1660,8 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
       image->size = MAX2(image->size, offset + image->planes[plane].surface.total_size);
       image->alignment = MAX2(image->alignment, 1 << image->planes[plane].surface.alignment_log2);
 
-      image->planes[plane].format = vk_format_get_plane_format(image->vk_format, plane);
+      image->planes[plane].format =
+         radv_image_get_plane_format(device->physical_device, image, plane);
    }
 
    image->tc_compatible_cmask =
@@ -1710,7 +1772,8 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
       vk_find_struct_const(pCreateInfo->pNext, IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT);
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
 
-   const unsigned plane_count = vk_format_get_plane_count(format);
+   unsigned plane_count = radv_get_internal_plane_count(device->physical_device, format);
+
    const size_t image_struct_size = sizeof(*image) + sizeof(struct radv_image_plane) * plane_count;
 
    radv_assert(pCreateInfo->mipLevels > 0);
@@ -1741,7 +1804,7 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
    image->tiling = pCreateInfo->tiling;
    image->usage = pCreateInfo->usage;
    image->flags = pCreateInfo->flags;
-   image->plane_count = plane_count;
+   image->plane_count = vk_format_get_plane_count(format);
 
    image->exclusive = pCreateInfo->sharingMode == VK_SHARING_MODE_EXCLUSIVE;
    if (pCreateInfo->sharingMode == VK_SHARING_MODE_CONCURRENT) {
@@ -1768,7 +1831,7 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
    else if (explicit_mod)
       modifier = explicit_mod->drmFormatModifier;
 
-   for (unsigned plane = 0; plane < image->plane_count; ++plane) {
+   for (unsigned plane = 0; plane < plane_count; ++plane) {
       image->planes[plane].surface.flags =
          radv_get_surface_flags(device, image, plane, pCreateInfo, format);
       image->planes[plane].surface.modifier = modifier;
@@ -1991,6 +2054,23 @@ radv_image_view_init(struct radv_image_view *iview, struct radv_device *device,
          iview->vk_format = vk_format_depth_only(iview->vk_format);
    }
 
+   if (vk_format_get_plane_count(image->vk_format) > 1 &&
+       iview->aspect_mask == VK_IMAGE_ASPECT_COLOR_BIT) {
+      plane_count = vk_format_get_plane_count(iview->vk_format);
+   }
+
+   if (device->physical_device->emulate_etc2 &&
+       vk_format_description(image->vk_format)->layout == UTIL_FORMAT_LAYOUT_ETC) {
+      const struct util_format_description *desc = vk_format_description(iview->vk_format);
+      assert(desc);
+      if (desc->layout == UTIL_FORMAT_LAYOUT_ETC) {
+         iview->plane_id = 1;
+         iview->vk_format = etc2_emulation_format(iview->vk_format);
+      }
+
+      plane_count = 1;
+   }
+
    if (device->physical_device->rad_info.chip_class >= GFX9) {
       iview->extent = (VkExtent3D){
          .width = image->info.width,
@@ -2008,8 +2088,8 @@ radv_image_view_init(struct radv_image_view *iview, struct radv_device *device,
    if (iview->vk_format != image->planes[iview->plane_id].format) {
       unsigned view_bw = vk_format_get_blockwidth(iview->vk_format);
       unsigned view_bh = vk_format_get_blockheight(iview->vk_format);
-      unsigned img_bw = vk_format_get_blockwidth(image->vk_format);
-      unsigned img_bh = vk_format_get_blockheight(image->vk_format);
+      unsigned img_bw = vk_format_get_blockwidth(image->planes[iview->plane_id].format);
+      unsigned img_bh = vk_format_get_blockheight(image->planes[iview->plane_id].format);
 
       iview->extent.width = round_up_u32(iview->extent.width * view_bw, img_bw);
       iview->extent.height = round_up_u32(iview->extent.height * view_bh, img_bh);
@@ -2067,11 +2147,6 @@ radv_image_view_init(struct radv_image_view *iview, struct radv_device *device,
    }
 
    iview->support_fast_clear = radv_image_view_can_fast_clear(device, iview);
-
-   if (vk_format_get_plane_count(image->vk_format) > 1 &&
-       iview->aspect_mask == VK_IMAGE_ASPECT_COLOR_BIT) {
-      plane_count = vk_format_get_plane_count(iview->vk_format);
-   }
 
    bool disable_compression = extra_create_info ? extra_create_info->disable_compression : false;
    bool enable_compression = extra_create_info ? extra_create_info->enable_compression : false;

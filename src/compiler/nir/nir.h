@@ -91,6 +91,7 @@ extern bool nir_debug_print_shader[MESA_SHADER_KERNEL + 1];
 #define NIR_DEBUG_PRINT_IS               (1u << 17)
 #define NIR_DEBUG_PRINT_CBS              (1u << 18)
 #define NIR_DEBUG_PRINT_KS               (1u << 19)
+#define NIR_DEBUG_PRINT_CONSTS           (1u << 20)
 
 #define NIR_DEBUG_PRINT (NIR_DEBUG_PRINT_VS  | \
                          NIR_DEBUG_PRINT_TCS | \
@@ -123,6 +124,9 @@ nir_num_components_valid(unsigned num_components)
            num_components == 8  ||
            num_components == 16;
 }
+
+void
+nir_process_debug_variable(void);
 
 bool nir_component_mask_can_reinterpret(nir_component_mask_t mask,
                                         unsigned old_bit_size,
@@ -4735,6 +4739,12 @@ typedef struct nir_lower_tex_options {
    bool lower_rect_offset;
 
    /**
+    * If not NULL, this filter will return true for tex instructions that
+    * should lower away nir_tex_src_offset.
+    */
+   nir_instr_filter_cb lower_offset_filter;
+
+   /**
     * If true, lower rect textures to 2D, using txs to fetch the
     * texture dimensions and dividing the texture coords by the
     * texture dims to normalize.
@@ -4891,6 +4901,17 @@ typedef struct nir_lower_tex_options {
     * Indexed by sampler-id.
     */
    enum nir_lower_tex_packing lower_tex_packing[32];
+
+   /**
+    * If true, lower nir_texop_lod to return -FLT_MAX if the sum of the
+    * absolute values of derivatives is 0 for all coordinates.
+    */
+   bool lower_lod_zero_width;
+
+   /**
+    * Payload data to be sent to callback / filter functions.
+    */
+   void *callback_data;
 } nir_lower_tex_options;
 
 /** Lowers complex texture instructions to simpler ones */
@@ -4995,7 +5016,7 @@ typedef struct nir_lower_wpos_ytransform_options {
 
 bool nir_lower_wpos_ytransform(nir_shader *shader,
                                const nir_lower_wpos_ytransform_options *options);
-bool nir_lower_wpos_center(nir_shader *shader, const bool for_sample_shading);
+bool nir_lower_wpos_center(nir_shader *shader);
 
 bool nir_lower_pntc_ytransform(nir_shader *shader,
                                const gl_state_index16 clipplane_state_tokens[][STATE_LENGTH]);

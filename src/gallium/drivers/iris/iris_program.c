@@ -1549,12 +1549,16 @@ iris_compile_tcs(struct iris_screen *screen,
       prog_data->ubo_ranges[0].length = 1;
    }
 
-   char *error_str = NULL;
-   const unsigned *program =
-      brw_compile_tcs(compiler, dbg, mem_ctx, &brw_key, tcs_prog_data,
-                      nir, NULL, &error_str);
+   struct brw_compile_tcs_params params = {
+      .nir = nir,
+      .key = &brw_key,
+      .prog_data = tcs_prog_data,
+      .log_data = dbg,
+   };
+
+   const unsigned *program = brw_compile_tcs(compiler, mem_ctx, &params);
    if (program == NULL) {
-      dbg_printf("Failed to compile control shader: %s\n", error_str);
+      dbg_printf("Failed to compile control shader: %s\n", params.error_str);
       ralloc_free(mem_ctx);
 
       shader->compilation_failed = true;
@@ -1707,12 +1711,17 @@ iris_compile_tes(struct iris_screen *screen,
 
    struct brw_tes_prog_key brw_key = iris_to_brw_tes_key(devinfo, key);
 
-   char *error_str = NULL;
-   const unsigned *program =
-      brw_compile_tes(compiler, dbg, mem_ctx, &brw_key, &input_vue_map,
-                      tes_prog_data, nir, NULL, &error_str);
+   struct brw_compile_tes_params params = {
+      .nir = nir,
+      .key = &brw_key,
+      .prog_data = tes_prog_data,
+      .input_vue_map = &input_vue_map,
+      .log_data = dbg,
+   };
+
+   const unsigned *program = brw_compile_tes(compiler, mem_ctx, &params);
    if (program == NULL) {
-      dbg_printf("Failed to compile evaluation shader: %s\n", error_str);
+      dbg_printf("Failed to compile evaluation shader: %s\n", params.error_str);
       ralloc_free(mem_ctx);
 
       shader->compilation_failed = true;
@@ -1841,12 +1850,16 @@ iris_compile_gs(struct iris_screen *screen,
 
    struct brw_gs_prog_key brw_key = iris_to_brw_gs_key(devinfo, key);
 
-   char *error_str = NULL;
-   const unsigned *program =
-      brw_compile_gs(compiler, dbg, mem_ctx, &brw_key, gs_prog_data,
-                     nir, NULL, &error_str);
+   struct brw_compile_gs_params params = {
+      .nir = nir,
+      .key = &brw_key,
+      .prog_data = gs_prog_data,
+      .log_data = dbg,
+   };
+
+   const unsigned *program = brw_compile_gs(compiler, mem_ctx, &params);
    if (program == NULL) {
-      dbg_printf("Failed to compile geometry shader: %s\n", error_str);
+      dbg_printf("Failed to compile geometry shader: %s\n", params.error_str);
       ralloc_free(mem_ctx);
 
       shader->compilation_failed = true;

@@ -30,10 +30,11 @@ project(
   default_options : ['buildtype=debugoptimized', 'b_ndebug=if-release', 'c_std=c11', 'cpp_std=c++14', 'prefix=/data/data/com.termux/files/usr']
 )
 
-# For meson >= 0.55.0, meson can inject some extra arguments to get richer
-# results from gtest based tests.
+# In recent versions, meson can inject some extra arguments to get richer
+# results from gtest based tests.  Feature was added in 0.55, but requiring
+# 0.59.2 to include an important fix.  See https://github.com/mesonbuild/meson/pull/9283.
 gtest_test_protocol = 'exitcode'
-if meson.version().version_compare('>= 0.55.0')
+if meson.version().version_compare('>= 0.59.2')
   gtest_test_protocol = 'gtest'
 endif
 
@@ -884,12 +885,7 @@ elif _power8 == 'false'
   warning('power8 option "false" deprecated, please use "disabled" instead.')
 endif
 if _power8 != 'disabled'
-  # on old versions of meson the cpu family would return as ppc64le on little
-  # endian power8, this was changed in 0.48 such that the family would always
-  # be ppc64 regardless of endianness, and then the machine.endian() value
-  # should be checked. Since we support versions < 0.48 we need to use
-  # startswith.
-  if host_machine.cpu_family().startswith('ppc64') and host_machine.endian() == 'little'
+  if host_machine.cpu_family() == 'ppc64' and host_machine.endian() == 'little'
     if cc.get_id() == 'gcc' and cc.version().version_compare('< 4.8')
       error('Altivec is not supported with gcc version < 4.8.')
     endif
@@ -1213,7 +1209,7 @@ if host_machine.system() == 'windows'
     endif
   else
     add_project_link_arguments(
-      cc.get_supported_arguments(
+      cc.get_supported_link_arguments(
         '-Wl,--nxcompat',
         '-Wl,--dynamicbase',
         '-static-libgcc',
@@ -1222,7 +1218,7 @@ if host_machine.system() == 'windows'
       language : ['c'],
     )
     add_project_link_arguments(
-      cpp.get_supported_arguments(
+      cpp.get_supported_link_arguments(
         '-Wl,--nxcompat',
         '-Wl,--dynamicbase',
         '-static-libgcc',
@@ -1341,7 +1337,7 @@ elif host_machine.cpu_family() == 'sparc64'
     with_asm_arch = 'sparc'
     pre_args += ['-DUSE_SPARC_ASM']
   endif
-elif host_machine.cpu_family().startswith('ppc64') and host_machine.endian() == 'little'
+elif host_machine.cpu_family() == 'ppc64' and host_machine.endian() == 'little'
   if system_has_kms_drm
     with_asm_arch = 'ppc64le'
     pre_args += ['-DUSE_PPC64LE_ASM']
@@ -1717,10 +1713,6 @@ if with_llvm
     # programs, so we need to build all C++ code in mesa without rtti as well to
     # ensure that linking works. Note that MSVC does handle mismatching RTTI
     # without issues, so only apply this for other compilers.
-    #
-    # In meson 0.51.0 we can use cmake to find LLVM in addittion to meson's
-    # builtin llvm-config based finder. A new generic variable getter method
-    # has also been added, so we'll use that if we can, to cover the cmake case.
     if dep_llvm.type_name() == 'internal'
       _llvm_rtti = subproject('llvm').get_variable('has_rtti', true)
     else
@@ -2177,18 +2169,12 @@ subdir('include')
 subdir('bin')
 subdir('src')
 
-# Meson 0.49 and earlier seems to have a bug that fails to evaluate the string-
-# formatting below unless the first argument is passed as a variable. This has
-# been fixed in Meson 0.50 and beyond, but we need to keep it like this for now
-# for backwards compatibility.
-_with_opengl_string = with_opengl ? 'yes' : 'no'
-
 lines = ['',
   'prefix:          ' + get_option('prefix'),
   'libdir:          ' + get_option('libdir'),
   'includedir:      ' + get_option('includedir'),
   '',
-  'OpenGL:          @0@ (ES1: @1@ ES2: @2@)'.format(_with_opengl_string,
+  'OpenGL:          @0@ (ES1: @1@ ES2: @2@)'.format(with_opengl ? 'yes' : 'no',
                                                     with_gles1 ? 'yes' : 'no',
                                                     with_gles2 ? 'yes' : 'no'),
 ]

@@ -79,7 +79,6 @@
 #include "glheader.h"
 
 #include "accum.h"
-#include "api_exec.h"
 #include "arrayobj.h"
 #include "attrib.h"
 #include "bbox.h"
@@ -153,6 +152,7 @@
 #include "compiler/glsl/glsl_parser_extras.h"
 #include <stdbool.h>
 #include "util/u_memory.h"
+#include "api_exec_decl.h"
 
 #include "state_tracker/st_cb_texture.h"
 #include "state_tracker/st_cb_flush.h"
@@ -168,80 +168,6 @@ int MESA_DEBUG_FLAGS = 0;
 
 /* ubyte -> float conversion */
 GLfloat _mesa_ubyte_to_float_color_tab[256];
-
-
-/**********************************************************************/
-/** \name GL Visual initialization                                    */
-/**********************************************************************/
-/*@{*/
-
-
-/**
- * Makes some sanity checks and fills in the fields of the struct
- * gl_config object with the given parameters.  If the caller needs to
- * set additional fields, he should just probably init the whole
- * gl_config object himself.
- *
- * \param dbFlag double buffering
- * \param stereoFlag stereo buffer
- * \param depthBits requested bits per depth buffer value. Any value in [0, 32]
- * is acceptable but the actual depth type will be GLushort or GLuint as
- * needed.
- * \param stencilBits requested minimum bits per stencil buffer value
- * \param accumRedBits, accumGreenBits, accumBlueBits, accumAlphaBits number
- * of bits per color component in accum buffer.
- * \param redBits number of bits per color component in frame buffer for RGB(A)
- * mode.  We always use 8 in core Mesa though.
- * \param greenBits same as above.
- * \param blueBits same as above.
- * \param alphaBits same as above.
- * \param numSamples number of samples per pixel.
- *
- * \return pointer to new struct gl_config or NULL if requested parameters
- * can't be met.
- *
- * \return GL_TRUE on success, or GL_FALSE on failure.
- */
-void
-_mesa_initialize_visual( struct gl_config *vis,
-                         GLboolean dbFlag,
-                         GLboolean stereoFlag,
-                         GLint redBits,
-                         GLint greenBits,
-                         GLint blueBits,
-                         GLint alphaBits,
-                         GLint depthBits,
-                         GLint stencilBits,
-                         GLint accumRedBits,
-                         GLint accumGreenBits,
-                         GLint accumBlueBits,
-                         GLint accumAlphaBits,
-                         GLuint numSamples )
-{
-   assert(vis);
-
-   vis->doubleBufferMode = dbFlag;
-   vis->stereoMode       = stereoFlag;
-
-   vis->redBits          = redBits;
-   vis->greenBits        = greenBits;
-   vis->blueBits         = blueBits;
-   vis->alphaBits        = alphaBits;
-   vis->rgbBits          = redBits + greenBits + blueBits + alphaBits;
-
-   vis->depthBits      = depthBits;
-   vis->stencilBits    = stencilBits;
-
-   vis->accumRedBits   = accumRedBits;
-   vis->accumGreenBits = accumGreenBits;
-   vis->accumBlueBits  = accumBlueBits;
-   vis->accumAlphaBits = accumAlphaBits;
-
-   vis->samples = numSamples;
-}
-
-
-/*@}*/
 
 
 /**********************************************************************/
@@ -917,6 +843,17 @@ generic_nop(void)
 #endif
 
 
+static int
+glthread_nop(void)
+{
+   /* This writes the error into the glthread command buffer if glthread is
+    * enabled.
+    */
+   CALL_InternalSetError(GET_DISPATCH(), (GL_INVALID_OPERATION));
+   return 0;
+}
+
+
 /**
  * Create a new API dispatch table in which all entries point to the
  * generic_nop() function.  This will not work on Windows because of
@@ -924,7 +861,7 @@ generic_nop(void)
  * call stack.  That's impossible with one generic no-op function.
  */
 struct _glapi_table *
-_mesa_new_nop_table(unsigned numEntries)
+_mesa_new_nop_table(unsigned numEntries, bool glthread)
 {
    struct _glapi_table *table;
 
@@ -940,6 +877,13 @@ _mesa_new_nop_table(unsigned numEntries)
 #else
    table = _glapi_new_nop_table(numEntries);
 #endif
+
+   if (glthread) {
+      _glapi_proc *entry = (_glapi_proc *) table;
+      for (unsigned i = 0; i < numEntries; i++)
+         entry[i] = (_glapi_proc)glthread_nop;
+   }
+
    return table;
 }
 
@@ -950,7 +894,7 @@ _mesa_new_nop_table(unsigned numEntries)
  * functions will call nop_handler() above.
  */
 struct _glapi_table *
-_mesa_alloc_dispatch_table(void)
+_mesa_alloc_dispatch_table(bool glthread)
 {
    /* Find the larger of Mesa's dispatch table and libGL's dispatch table.
     * In practice, this'll be the same for stand-alone Mesa.  But for DRI
@@ -959,7 +903,7 @@ _mesa_alloc_dispatch_table(void)
     */
    int numEntries = MAX2(_glapi_get_dispatch_table_size(), _gloffset_COUNT);
 
-   struct _glapi_table *table = _mesa_new_nop_table(numEntries);
+   struct _glapi_table *table = _mesa_new_nop_table(numEntries, glthread);
 
 #if defined(_WIN32)
    if (table) {
@@ -990,87 +934,18 @@ _mesa_alloc_dispatch_table(void)
    return table;
 }
 
-/**
- * Creates a minimal dispatch table for use within glBegin()/glEnd().
- *
- * This ensures that we generate GL_INVALID_OPERATION errors from most
- * functions, since the set of functions that are valid within Begin/End is
- * very small.
- *
- * From the GL 1.0 specification section 2.6.3, "GL Commands within
- * Begin/End"
- *
- *     "The only GL commands that are allowed within any Begin/End pairs are
- *      the commands for specifying vertex coordinates, vertex color, normal
- *      coordinates, and texture coordinates (Vertex, Color, Index, Normal,
- *      TexCoord), EvalCoord and EvalPoint commands (see section 5.1),
- *      commands for specifying lighting material parameters (Material
- *      commands see section 2.12.2), display list invocation commands
- *      (CallList and CallLists see section 5.4), and the EdgeFlag
- *      command. Executing Begin after Begin has already been executed but
- *      before an End is issued generates the INVALID OPERATION error, as does
- *      executing End without a previous corresponding Begin. Executing any
- *      other GL command within Begin/End results in the error INVALID
- *      OPERATION."
- *
- * The table entries for specifying vertex attributes are set up by
- * install_vtxfmt(), and End() and dlists
- * are set by install_vtxfmt() as well.
- */
-static struct _glapi_table *
-create_beginend_table(const struct gl_context *ctx)
-{
-   struct _glapi_table *table;
-
-   table = _mesa_alloc_dispatch_table();
-   if (!table)
-      return NULL;
-
-   /* Fill in functions which return a value, since they should return some
-    * specific value even if they emit a GL_INVALID_OPERATION error from them
-    * being called within glBegin()/glEnd().
-    */
-#define COPY_DISPATCH(func) SET_##func(table, GET_##func(ctx->Exec))
-
-   COPY_DISPATCH(GenLists);
-   COPY_DISPATCH(IsProgram);
-   COPY_DISPATCH(IsVertexArray);
-   COPY_DISPATCH(IsBuffer);
-   COPY_DISPATCH(IsEnabled);
-   COPY_DISPATCH(IsEnabledi);
-   COPY_DISPATCH(IsRenderbuffer);
-   COPY_DISPATCH(IsFramebuffer);
-   COPY_DISPATCH(CheckFramebufferStatus);
-   COPY_DISPATCH(RenderMode);
-   COPY_DISPATCH(GetString);
-   COPY_DISPATCH(GetStringi);
-   COPY_DISPATCH(GetPointerv);
-   COPY_DISPATCH(IsQuery);
-   COPY_DISPATCH(IsSampler);
-   COPY_DISPATCH(IsSync);
-   COPY_DISPATCH(IsTexture);
-   COPY_DISPATCH(IsTransformFeedback);
-   COPY_DISPATCH(DeleteQueries);
-   COPY_DISPATCH(AreTexturesResident);
-   COPY_DISPATCH(FenceSync);
-   COPY_DISPATCH(ClientWaitSync);
-   COPY_DISPATCH(MapBuffer);
-   COPY_DISPATCH(UnmapBuffer);
-   COPY_DISPATCH(MapBufferRange);
-   COPY_DISPATCH(ObjectPurgeableAPPLE);
-   COPY_DISPATCH(ObjectUnpurgeableAPPLE);
-
-   return table;
-}
-
 void
 _mesa_initialize_dispatch_tables(struct gl_context *ctx)
 {
-   /* Do the code-generated setup of the exec table in api_exec.c. */
+   /* Do the code-generated setup of the exec table in api_exec_init.c. */
    _mesa_initialize_exec_table(ctx);
 
    if (ctx->Save)
       _mesa_initialize_save_table(ctx);
+
+   vbo_install_exec_vtxfmt(ctx);
+   if (ctx->API == API_OPENGL_COMPAT)
+      _mesa_install_save_vtxfmt(ctx);
 }
 
 /**
@@ -1167,7 +1042,7 @@ _mesa_initialize_context(struct gl_context *ctx,
    }
 
    /* setup the API dispatch tables with all nop functions */
-   ctx->OutsideBeginEnd = _mesa_alloc_dispatch_table();
+   ctx->OutsideBeginEnd = _mesa_alloc_dispatch_table(false);
    if (!ctx->OutsideBeginEnd)
       goto fail;
    ctx->Exec = ctx->OutsideBeginEnd;
@@ -1194,8 +1069,8 @@ _mesa_initialize_context(struct gl_context *ctx,
 
    switch (ctx->API) {
    case API_OPENGL_COMPAT:
-      ctx->BeginEnd = create_beginend_table(ctx);
-      ctx->Save = _mesa_alloc_dispatch_table();
+      ctx->BeginEnd = _mesa_alloc_dispatch_table(false);
+      ctx->Save = _mesa_alloc_dispatch_table(false);
       if (!ctx->BeginEnd || !ctx->Save)
          goto fail;
 

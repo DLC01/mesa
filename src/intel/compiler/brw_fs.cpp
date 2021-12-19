@@ -1228,17 +1228,17 @@ centroid_to_pixel(enum brw_barycentric_mode bary)
    return (enum brw_barycentric_mode) ((unsigned) bary - 1);
 }
 
-fs_reg *
+fs_reg
 fs_visitor::emit_frontfacing_interpolation()
 {
-   fs_reg *reg = new(this->mem_ctx) fs_reg(vgrf(glsl_type::bool_type));
+   fs_reg ff = bld.vgrf(BRW_REGISTER_TYPE_D);
 
    if (devinfo->ver >= 12) {
       fs_reg g1 = fs_reg(retype(brw_vec1_grf(1, 1), BRW_REGISTER_TYPE_W));
 
       fs_reg tmp = bld.vgrf(BRW_REGISTER_TYPE_W);
       bld.ASR(tmp, g1, brw_imm_d(15));
-      bld.NOT(*reg, tmp);
+      bld.NOT(ff, tmp);
    } else if (devinfo->ver >= 6) {
       /* Bit 15 of g0.0 is 0 if the polygon is front facing. We want to create
        * a boolean result from this (~0/true or 0/false).
@@ -1254,7 +1254,7 @@ fs_visitor::emit_frontfacing_interpolation()
       fs_reg g0 = fs_reg(retype(brw_vec1_grf(0, 0), BRW_REGISTER_TYPE_W));
       g0.negate = true;
 
-      bld.ASR(*reg, g0, brw_imm_d(15));
+      bld.ASR(ff, g0, brw_imm_d(15));
    } else {
       /* Bit 31 of g1.6 is 0 if the polygon is front facing. We want to create
        * a boolean result from this (1/true or 0/false).
@@ -1269,45 +1269,32 @@ fs_visitor::emit_frontfacing_interpolation()
       fs_reg g1_6 = fs_reg(retype(brw_vec1_grf(1, 6), BRW_REGISTER_TYPE_D));
       g1_6.negate = true;
 
-      bld.ASR(*reg, g1_6, brw_imm_d(31));
+      bld.ASR(ff, g1_6, brw_imm_d(31));
    }
 
-   return reg;
+   return ff;
 }
 
-void
-fs_visitor::compute_sample_position(fs_reg dst, fs_reg int_sample_pos)
+fs_reg
+fs_visitor::emit_samplepos_setup()
 {
    assert(stage == MESA_SHADER_FRAGMENT);
    struct brw_wm_prog_data *wm_prog_data = brw_wm_prog_data(this->prog_data);
-   assert(dst.type == BRW_REGISTER_TYPE_F);
+   assert(devinfo->ver >= 6);
 
-   if (wm_prog_data->persample_dispatch) {
-      /* Convert int_sample_pos to floating point */
-      bld.MOV(dst, int_sample_pos);
-      /* Scale to the range [0, 1] */
-      bld.MUL(dst, dst, brw_imm_f(1 / 16.0f));
-   }
-   else {
+   const fs_builder abld = bld.annotate("compute sample position");
+   fs_reg pos = abld.vgrf(BRW_REGISTER_TYPE_F, 2);
+
+   if (!wm_prog_data->persample_dispatch) {
       /* From ARB_sample_shading specification:
        * "When rendering to a non-multisample buffer, or if multisample
        *  rasterization is disabled, gl_SamplePosition will always be
        *  (0.5, 0.5).
        */
-      bld.MOV(dst, brw_imm_f(0.5f));
+      bld.MOV(offset(pos, bld, 0), brw_imm_f(0.5f));
+      bld.MOV(offset(pos, bld, 1), brw_imm_f(0.5f));
+      return pos;
    }
-}
-
-fs_reg *
-fs_visitor::emit_samplepos_setup()
-{
-   assert(devinfo->ver >= 6);
-
-   const fs_builder abld = bld.annotate("compute sample position");
-   fs_reg *reg = new(this->mem_ctx) fs_reg(vgrf(glsl_type::vec2_type));
-   fs_reg pos = *reg;
-   fs_reg int_sample_x = vgrf(glsl_type::int_type);
-   fs_reg int_sample_y = vgrf(glsl_type::int_type);
 
    /* WM will be run in MSDISPMODE_PERSAMPLE. So, only one of SIMD8 or SIMD16
     * mode will be enabled.
@@ -1323,17 +1310,20 @@ fs_visitor::emit_samplepos_setup()
    const fs_reg sample_pos_reg =
       fetch_payload_reg(abld, payload.sample_pos_reg, BRW_REGISTER_TYPE_W);
 
-   /* Compute gl_SamplePosition.x */
-   abld.MOV(int_sample_x, subscript(sample_pos_reg, BRW_REGISTER_TYPE_B, 0));
-   compute_sample_position(offset(pos, abld, 0), int_sample_x);
+   for (unsigned i = 0; i < 2; i++) {
+      fs_reg tmp_d = bld.vgrf(BRW_REGISTER_TYPE_D);
+      abld.MOV(tmp_d, subscript(sample_pos_reg, BRW_REGISTER_TYPE_B, i));
+      /* Convert int_sample_pos to floating point */
+      fs_reg tmp_f = bld.vgrf(BRW_REGISTER_TYPE_F);
+      abld.MOV(tmp_f, tmp_d);
+      /* Scale to the range [0, 1] */
+      abld.MUL(offset(pos, abld, i), tmp_f, brw_imm_f(1 / 16.0f));
+   }
 
-   /* Compute gl_SamplePosition.y */
-   abld.MOV(int_sample_y, subscript(sample_pos_reg, BRW_REGISTER_TYPE_B, 1));
-   compute_sample_position(offset(pos, abld, 1), int_sample_y);
-   return reg;
+   return pos;
 }
 
-fs_reg *
+fs_reg
 fs_visitor::emit_sampleid_setup()
 {
    assert(stage == MESA_SHADER_FRAGMENT);
@@ -1341,14 +1331,14 @@ fs_visitor::emit_sampleid_setup()
    assert(devinfo->ver >= 6);
 
    const fs_builder abld = bld.annotate("compute sample id");
-   fs_reg *reg = new(this->mem_ctx) fs_reg(vgrf(glsl_type::uint_type));
+   fs_reg sample_id = abld.vgrf(BRW_REGISTER_TYPE_UD);
 
    if (!key->multisample_fbo) {
       /* As per GL_ARB_sample_shading specification:
        * "When rendering to a non-multisample buffer, or if multisample
        *  rasterization is disabled, gl_SampleID will always be zero."
        */
-      abld.MOV(*reg, brw_imm_d(0));
+      abld.MOV(sample_id, brw_imm_d(0));
    } else if (devinfo->ver >= 8) {
       /* Sample ID comes in as 4-bit numbers in g1.0:
        *
@@ -1388,7 +1378,7 @@ fs_visitor::emit_sampleid_setup()
                   brw_imm_v(0x44440000));
       }
 
-      abld.AND(*reg, tmp, brw_imm_w(0xf));
+      abld.AND(sample_id, tmp, brw_imm_w(0xf));
    } else {
       const fs_reg t1 = component(abld.vgrf(BRW_REGISTER_TYPE_UD), 0);
       const fs_reg t2 = abld.vgrf(BRW_REGISTER_TYPE_UW);
@@ -1434,20 +1424,20 @@ fs_visitor::emit_sampleid_setup()
       /* This special instruction takes care of setting vstride=1,
        * width=4, hstride=0 of t2 during an ADD instruction.
        */
-      abld.emit(FS_OPCODE_SET_SAMPLE_ID, *reg, t1, t2);
+      abld.emit(FS_OPCODE_SET_SAMPLE_ID, sample_id, t1, t2);
    }
 
-   return reg;
+   return sample_id;
 }
 
-fs_reg *
+fs_reg
 fs_visitor::emit_samplemaskin_setup()
 {
    assert(stage == MESA_SHADER_FRAGMENT);
    struct brw_wm_prog_data *wm_prog_data = brw_wm_prog_data(this->prog_data);
    assert(devinfo->ver >= 6);
 
-   fs_reg *reg = new(this->mem_ctx) fs_reg(vgrf(glsl_type::int_type));
+   fs_reg mask = bld.vgrf(BRW_REGISTER_TYPE_D);
 
    /* The HW doesn't provide us with expected values. */
    assert(!wm_prog_data->per_coarse_pixel_dispatch);
@@ -1469,28 +1459,27 @@ fs_visitor::emit_samplemaskin_setup()
       const fs_builder abld = bld.annotate("compute gl_SampleMaskIn");
 
       if (nir_system_values[SYSTEM_VALUE_SAMPLE_ID].file == BAD_FILE)
-         nir_system_values[SYSTEM_VALUE_SAMPLE_ID] = *emit_sampleid_setup();
+         nir_system_values[SYSTEM_VALUE_SAMPLE_ID] = emit_sampleid_setup();
 
       fs_reg one = vgrf(glsl_type::int_type);
       fs_reg enabled_mask = vgrf(glsl_type::int_type);
       abld.MOV(one, brw_imm_d(1));
       abld.SHL(enabled_mask, one, nir_system_values[SYSTEM_VALUE_SAMPLE_ID]);
-      abld.AND(*reg, enabled_mask, coverage_mask);
+      abld.AND(mask, enabled_mask, coverage_mask);
    } else {
       /* In per-pixel mode, the coverage mask is sufficient. */
-      *reg = coverage_mask;
+      mask = coverage_mask;
    }
-   return reg;
+   return mask;
 }
 
-fs_reg *
+fs_reg
 fs_visitor::emit_shading_rate_setup()
 {
    assert(devinfo->ver >= 11);
 
    const fs_builder abld = bld.annotate("compute fragment shading rate");
-
-   fs_reg *reg = new(this->mem_ctx) fs_reg(bld.vgrf(BRW_REGISTER_TYPE_UD));
+   fs_reg rate = abld.vgrf(BRW_REGISTER_TYPE_UD);
 
    struct brw_wm_prog_data *wm_prog_data =
       brw_wm_prog_data(bld.shader->stage_prog_data);
@@ -1516,12 +1505,12 @@ fs_visitor::emit_shading_rate_setup()
       abld.SHR(int_rate_y, actual_y, brw_imm_ud(1));
       abld.SHR(int_rate_x, actual_x, brw_imm_ud(1));
       abld.SHL(int_rate_x, int_rate_x, brw_imm_ud(2));
-      abld.OR(*reg, int_rate_x, int_rate_y);
+      abld.OR(rate, int_rate_x, int_rate_y);
    } else {
-      abld.MOV(*reg, brw_imm_ud(0));
+      abld.MOV(rate, brw_imm_ud(0));
    }
 
-   return reg;
+   return rate;
 }
 
 fs_reg
@@ -2060,22 +2049,17 @@ fs_visitor::assign_gs_urb_setup()
 /**
  * Split large virtual GRFs into separate components if we can.
  *
- * This is mostly duplicated with what brw_fs_vector_splitting does,
- * but that's really conservative because it's afraid of doing
- * splitting that doesn't result in real progress after the rest of
- * the optimization phases, which would cause infinite looping in
- * optimization.  We can do it once here, safely.  This also has the
- * opportunity to split interpolated values, or maybe even uniforms,
- * which we don't have at the IR level.
- *
- * We want to split, because virtual GRFs are what we register
- * allocate and spill (due to contiguousness requirements for some
- * instructions), and they're what we naturally generate in the
- * codegen process, but most virtual GRFs don't actually need to be
- * contiguous sets of GRFs.  If we split, we'll end up with reduced
- * live intervals and better dead code elimination and coalescing.
+ * This pass aggressively splits VGRFs into as small a chunks as possible,
+ * down to single registers if it can.  If no VGRFs can be split, we return
+ * false so this pass can safely be used inside an optimization loop.  We
+ * want to split, because virtual GRFs are what we register allocate and
+ * spill (due to contiguousness requirements for some instructions), and
+ * they're what we naturally generate in the codegen process, but most
+ * virtual GRFs don't actually need to be contiguous sets of GRFs.  If we
+ * split, we'll end up with reduced live intervals and better dead code
+ * elimination and coalescing.
  */
-void
+bool
 fs_visitor::split_virtual_grfs()
 {
    /* Compact the register file so we eliminate dead vgrfs.  This
@@ -2146,10 +2130,15 @@ fs_visitor::split_virtual_grfs()
       }
    }
 
+   /* Bitset of which registers have been split */
+   bool *vgrf_has_split = new bool[num_vars];
+   memset(vgrf_has_split, 0, num_vars * sizeof(*vgrf_has_split));
+
    int *new_virtual_grf = new int[reg_count];
    int *new_reg_offset = new int[reg_count];
 
    int reg = 0;
+   bool has_splits = false;
    for (int i = 0; i < num_vars; i++) {
       /* The first one should always be 0 as a quick sanity check. */
       assert(split_points[reg] == false);
@@ -2165,6 +2154,8 @@ fs_visitor::split_virtual_grfs()
           * new virtual GRF for the previous offset many registers
           */
          if (split_points[reg]) {
+            has_splits = true;
+            vgrf_has_split[i] = true;
             assert(offset <= MAX_VGRF_SIZE);
             int grf = alloc.allocate(offset);
             for (int k = reg - offset; k < reg; k++)
@@ -2184,42 +2175,74 @@ fs_visitor::split_virtual_grfs()
    }
    assert(reg == reg_count);
 
+   bool progress;
+   if (!has_splits) {
+      progress = false;
+      goto cleanup;
+   }
+
    foreach_block_and_inst_safe(block, fs_inst, inst, cfg) {
       if (inst->opcode == SHADER_OPCODE_UNDEF) {
-         const fs_builder ibld(this, block, inst);
-         assert(inst->size_written % REG_SIZE == 0);
-         unsigned reg_offset = 0;
-         while (reg_offset < inst->size_written / REG_SIZE) {
-            reg = vgrf_to_reg[inst->dst.nr] + reg_offset;
-            ibld.UNDEF(fs_reg(VGRF, new_virtual_grf[reg], inst->dst.type));
-            reg_offset += alloc.sizes[new_virtual_grf[reg]];
+         assert(inst->dst.file == VGRF);
+         if (vgrf_has_split[inst->dst.nr]) {
+            const fs_builder ibld(this, block, inst);
+            assert(inst->size_written % REG_SIZE == 0);
+            unsigned reg_offset = 0;
+            while (reg_offset < inst->size_written / REG_SIZE) {
+               reg = vgrf_to_reg[inst->dst.nr] + reg_offset;
+               ibld.UNDEF(fs_reg(VGRF, new_virtual_grf[reg], inst->dst.type));
+               reg_offset += alloc.sizes[new_virtual_grf[reg]];
+            }
+            inst->remove(block);
+         } else {
+            reg = vgrf_to_reg[inst->dst.nr];
+            assert(new_reg_offset[reg] == 0);
+            assert(new_virtual_grf[reg] == (int)inst->dst.nr);
          }
-         inst->remove(block);
          continue;
       }
 
       if (inst->dst.file == VGRF) {
          reg = vgrf_to_reg[inst->dst.nr] + inst->dst.offset / REG_SIZE;
-         inst->dst.nr = new_virtual_grf[reg];
-         inst->dst.offset = new_reg_offset[reg] * REG_SIZE +
-                            inst->dst.offset % REG_SIZE;
-         assert((unsigned)new_reg_offset[reg] < alloc.sizes[new_virtual_grf[reg]]);
+         if (vgrf_has_split[inst->dst.nr]) {
+            inst->dst.nr = new_virtual_grf[reg];
+            inst->dst.offset = new_reg_offset[reg] * REG_SIZE +
+                               inst->dst.offset % REG_SIZE;
+            assert((unsigned)new_reg_offset[reg] <
+                   alloc.sizes[new_virtual_grf[reg]]);
+         } else {
+            assert(new_reg_offset[reg] == inst->dst.offset / REG_SIZE);
+            assert(new_virtual_grf[reg] == (int)inst->dst.nr);
+         }
       }
       for (int i = 0; i < inst->sources; i++) {
-	 if (inst->src[i].file == VGRF) {
-            reg = vgrf_to_reg[inst->src[i].nr] + inst->src[i].offset / REG_SIZE;
+	 if (inst->src[i].file != VGRF)
+            continue;
+
+         reg = vgrf_to_reg[inst->src[i].nr] + inst->src[i].offset / REG_SIZE;
+         if (vgrf_has_split[inst->src[i].nr]) {
             inst->src[i].nr = new_virtual_grf[reg];
             inst->src[i].offset = new_reg_offset[reg] * REG_SIZE +
                                   inst->src[i].offset % REG_SIZE;
-            assert((unsigned)new_reg_offset[reg] < alloc.sizes[new_virtual_grf[reg]]);
+            assert((unsigned)new_reg_offset[reg] <
+                   alloc.sizes[new_virtual_grf[reg]]);
+         } else {
+            assert(new_reg_offset[reg] == inst->src[i].offset / REG_SIZE);
+            assert(new_virtual_grf[reg] == (int)inst->src[i].nr);
          }
       }
    }
    invalidate_analysis(DEPENDENCY_INSTRUCTION_DETAIL | DEPENDENCY_VARIABLES);
 
+   progress = true;
+
+cleanup:
    delete[] split_points;
+   delete[] vgrf_has_split;
    delete[] new_virtual_grf;
    delete[] new_reg_offset;
+
+   return progress;
 }
 
 /**
@@ -8259,9 +8282,6 @@ fs_visitor::optimize()
 
    validate();
 
-   split_virtual_grfs();
-   validate();
-
 #define OPT(pass, args...) ({                                           \
       pass_num++;                                                       \
       bool this_progress = pass(args);                                  \
@@ -8291,6 +8311,8 @@ fs_visitor::optimize()
    bool progress = false;
    int iteration = 0;
    int pass_num = 0;
+
+   OPT(split_virtual_grfs);
 
    /* Before anything else, eliminate dead code.  The results of some NIR
     * instructions may effectively be calculated twice.  Once when the
@@ -8364,7 +8386,7 @@ fs_visitor::optimize()
    OPT(opt_redundant_halt);
 
    if (OPT(lower_load_payload)) {
-      split_virtual_grfs();
+      OPT(split_virtual_grfs);
 
       /* Lower 64 bit MOVs generated by payload lowering. */
       if (!devinfo->has_64bit_float && !devinfo->has_64bit_int)
@@ -8630,46 +8652,61 @@ fs_visitor::allocate_registers(bool allow_spilling)
    static const enum instruction_scheduler_mode pre_modes[] = {
       SCHEDULE_PRE,
       SCHEDULE_PRE_NON_LIFO,
+      SCHEDULE_NONE,
       SCHEDULE_PRE_LIFO,
    };
 
    static const char *scheduler_mode_name[] = {
       "top-down",
       "non-lifo",
+      "none",
       "lifo"
    };
 
    bool spill_all = allow_spilling && INTEL_DEBUG(DEBUG_SPILL_FS);
+
+   /* Before we schedule anything, stash off the instruction order as an array
+    * of fs_inst *.  This way, we can reset it between scheduling passes to
+    * prevent dependencies between the different scheduling modes.
+    */
+   int num_insts = cfg->last_block()->end_ip + 1;
+   fs_inst **inst_arr = ralloc_array(mem_ctx, fs_inst *, num_insts);
+
+   int ip = 0;
+   foreach_block_and_inst(block, fs_inst, inst, cfg) {
+      assert(ip >= block->start_ip && ip <= block->end_ip);
+      inst_arr[ip++] = inst;
+   }
+   assert(ip == num_insts);
 
    /* Try each scheduling heuristic to see if it can successfully register
     * allocate without spilling.  They should be ordered by decreasing
     * performance but increasing likelihood of allocating.
     */
    for (unsigned i = 0; i < ARRAY_SIZE(pre_modes); i++) {
-      schedule_instructions(pre_modes[i]);
+      if (i > 0) {
+         /* Unless we're the first pass, reset back to the original order */
+         ip = 0;
+         foreach_block (block, cfg) {
+            block->instructions.make_empty();
+
+            assert(ip == block->start_ip);
+            for (; ip <= block->end_ip; ip++)
+               block->instructions.push_tail(inst_arr[ip]);
+         }
+         assert(ip == num_insts);
+
+         invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+      }
+
+      if (pre_modes[i] != SCHEDULE_NONE)
+         schedule_instructions(pre_modes[i]);
       this->shader_stats.scheduler_mode = scheduler_mode_name[i];
 
       if (0) {
          assign_regs_trivial();
          allocated = true;
          break;
-      }
-
-      /* Scheduling may create additional opportunities for CMOD propagation,
-       * so let's do it again.  If CMOD propagation made any progress,
-       * eliminate dead code one more time.
-       */
-      bool progress = false;
-      const int iteration = 99;
-      int pass_num = 0;
-
-      if (OPT(opt_cmod_propagation)) {
-         /* dead_code_eliminate "undoes" the fixing done by
-          * fixup_3src_null_dest, so we have to do it again if
-          * dead_code_eliminiate makes any progress.
-          */
-         if (OPT(dead_code_eliminate))
-            fixup_3src_null_dest();
       }
 
       bool can_spill = allow_spilling &&
@@ -9491,7 +9528,10 @@ brw_nir_populate_wm_prog_data(const nir_shader *shader,
        * persample dispatch, we hard-code it to 0.5.
        */
       prog_data->uses_pos_offset = prog_data->persample_dispatch &&
-         BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_SAMPLE_POS);
+         (BITSET_TEST(shader->info.system_values_read,
+                      SYSTEM_VALUE_SAMPLE_POS) ||
+          BITSET_TEST(shader->info.system_values_read,
+                      SYSTEM_VALUE_SAMPLE_POS_OR_CENTER));
    }
 
    prog_data->has_render_target_reads = shader->info.outputs_read != 0ull;
@@ -9773,28 +9813,28 @@ brw_compile_fs(const struct brw_compiler *compiler,
    return g.get_assembly();
 }
 
-fs_reg *
+fs_reg
 fs_visitor::emit_work_group_id_setup()
 {
    assert(gl_shader_stage_uses_workgroup(stage));
 
-   fs_reg *reg = new(this->mem_ctx) fs_reg(vgrf(glsl_type::uvec3_type));
+   fs_reg id = bld.vgrf(BRW_REGISTER_TYPE_UD, 3);
 
    struct brw_reg r0_1(retype(brw_vec1_grf(0, 1), BRW_REGISTER_TYPE_UD));
-   bld.MOV(*reg, r0_1);
+   bld.MOV(id, r0_1);
 
    if (gl_shader_stage_is_compute(stage)) {
       struct brw_reg r0_6(retype(brw_vec1_grf(0, 6), BRW_REGISTER_TYPE_UD));
       struct brw_reg r0_7(retype(brw_vec1_grf(0, 7), BRW_REGISTER_TYPE_UD));
-      bld.MOV(offset(*reg, bld, 1), r0_6);
-      bld.MOV(offset(*reg, bld, 2), r0_7);
+      bld.MOV(offset(id, bld, 1), r0_6);
+      bld.MOV(offset(id, bld, 2), r0_7);
    } else {
       /* Task/Mesh have a single Workgroup ID dimension in the HW. */
-      bld.MOV(offset(*reg, bld, 1), brw_imm_ud(0));
-      bld.MOV(offset(*reg, bld, 2), brw_imm_ud(0));
+      bld.MOV(offset(id, bld, 1), brw_imm_ud(0));
+      bld.MOV(offset(id, bld, 2), brw_imm_ud(0));
    }
 
-   return reg;
+   return id;
 }
 
 unsigned
@@ -10163,22 +10203,20 @@ brw_bsr(const struct intel_device_info *devinfo,
 }
 
 const unsigned *
-brw_compile_bs(const struct brw_compiler *compiler, void *log_data,
+brw_compile_bs(const struct brw_compiler *compiler,
                void *mem_ctx,
-               const struct brw_bs_prog_key *key,
-               struct brw_bs_prog_data *prog_data,
-               nir_shader *shader,
-               unsigned num_resume_shaders,
-               struct nir_shader **resume_shaders,
-               struct brw_compile_stats *stats,
-               char **error_str)
+               struct brw_compile_bs_params *params)
 {
+   nir_shader *shader = params->nir;
+   struct brw_bs_prog_data *prog_data = params->prog_data;
+   unsigned num_resume_shaders = params->num_resume_shaders;
+   nir_shader **resume_shaders = params->resume_shaders;
    const bool debug_enabled = INTEL_DEBUG(DEBUG_RT);
 
    prog_data->base.stage = shader->info.stage;
    prog_data->max_stack_size = 0;
 
-   fs_generator g(compiler, log_data, mem_ctx, &prog_data->base,
+   fs_generator g(compiler, params->log_data, mem_ctx, &prog_data->base,
                   false, shader->info.stage);
    if (unlikely(debug_enabled)) {
       char *name = ralloc_asprintf(mem_ctx, "%s %s shader %s",
@@ -10190,8 +10228,9 @@ brw_compile_bs(const struct brw_compiler *compiler, void *log_data,
    }
 
    prog_data->simd_size =
-      compile_single_bs(compiler, log_data, mem_ctx, key, prog_data,
-                        shader, &g, stats, NULL, error_str);
+      compile_single_bs(compiler, params->log_data, mem_ctx,
+                        params->key, prog_data,
+                        shader, &g, params->stats, NULL, &params->error_str);
    if (prog_data->simd_size == 0)
       return NULL;
 
@@ -10209,8 +10248,9 @@ brw_compile_bs(const struct brw_compiler *compiler, void *log_data,
       /* TODO: Figure out shader stats etc. for resume shaders */
       int offset = 0;
       uint8_t simd_size =
-         compile_single_bs(compiler, log_data, mem_ctx, key, prog_data,
-                           resume_shaders[i], &g, NULL, &offset, error_str);
+         compile_single_bs(compiler, params->log_data, mem_ctx, params->key,
+                           prog_data, resume_shaders[i], &g, NULL, &offset,
+                           &params->error_str);
       if (simd_size == 0)
          return NULL;
 

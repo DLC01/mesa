@@ -75,11 +75,13 @@ v3dv_EnumerateInstanceVersion(uint32_t *pApiVersion)
     return VK_SUCCESS;
 }
 
-#define V3DV_HAS_SURFACE (VK_USE_PLATFORM_WIN32_KHR ||   \
-                          VK_USE_PLATFORM_WAYLAND_KHR || \
-                          VK_USE_PLATFORM_XCB_KHR ||     \
-                          VK_USE_PLATFORM_XLIB_KHR ||    \
-                          VK_USE_PLATFORM_DISPLAY_KHR)
+#if defined(VK_USE_PLATFORM_WIN32_KHR) ||   \
+    defined(VK_USE_PLATFORM_WAYLAND_KHR) || \
+    defined(VK_USE_PLATFORM_XCB_KHR) ||     \
+    defined(VK_USE_PLATFORM_XLIB_KHR) ||    \
+    defined(VK_USE_PLATFORM_DISPLAY_KHR)
+#define V3DV_USE_WSI_PLATFORM
+#endif
 
 static const struct vk_instance_extension_table instance_extensions = {
    .KHR_device_group_creation           = true,
@@ -91,7 +93,7 @@ static const struct vk_instance_extension_table instance_extensions = {
    .KHR_external_memory_capabilities    = true,
    .KHR_external_semaphore_capabilities = true,
    .KHR_get_physical_device_properties2 = true,
-#ifdef V3DV_HAS_SURFACE
+#ifdef V3DV_USE_WSI_PLATFORM
    .KHR_get_surface_capabilities2       = true,
    .KHR_surface                         = true,
    .KHR_surface_protected_capabilities  = true,
@@ -136,7 +138,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_sampler_mirror_clamp_to_edge    = true,
       .KHR_storage_buffer_storage_class    = true,
       .KHR_uniform_buffer_standard_layout  = true,
-#ifdef V3DV_HAS_SURFACE
+#ifdef V3DV_USE_WSI_PLATFORM
       .KHR_swapchain                       = true,
       .KHR_swapchain_mutable_format        = true,
       .KHR_incremental_present             = true,

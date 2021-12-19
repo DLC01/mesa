@@ -179,17 +179,18 @@ emit_system_values_block(nir_block *block, fs_visitor *v)
          break;
 
       case nir_intrinsic_load_sample_pos:
+      case nir_intrinsic_load_sample_pos_or_center:
          assert(v->stage == MESA_SHADER_FRAGMENT);
          reg = &v->nir_system_values[SYSTEM_VALUE_SAMPLE_POS];
          if (reg->file == BAD_FILE)
-            *reg = *v->emit_samplepos_setup();
+            *reg = v->emit_samplepos_setup();
          break;
 
       case nir_intrinsic_load_sample_id:
          assert(v->stage == MESA_SHADER_FRAGMENT);
          reg = &v->nir_system_values[SYSTEM_VALUE_SAMPLE_ID];
          if (reg->file == BAD_FILE)
-            *reg = *v->emit_sampleid_setup();
+            *reg = v->emit_sampleid_setup();
          break;
 
       case nir_intrinsic_load_sample_mask_in:
@@ -197,14 +198,14 @@ emit_system_values_block(nir_block *block, fs_visitor *v)
          assert(v->devinfo->ver >= 7);
          reg = &v->nir_system_values[SYSTEM_VALUE_SAMPLE_MASK_IN];
          if (reg->file == BAD_FILE)
-            *reg = *v->emit_samplemaskin_setup();
+            *reg = v->emit_samplemaskin_setup();
          break;
 
       case nir_intrinsic_load_workgroup_id:
          assert(gl_shader_stage_uses_workgroup(v->stage));
          reg = &v->nir_system_values[SYSTEM_VALUE_WORKGROUP_ID];
          if (reg->file == BAD_FILE)
-            *reg = *v->emit_work_group_id_setup();
+            *reg = v->emit_work_group_id_setup();
          break;
 
       case nir_intrinsic_load_helper_invocation:
@@ -265,7 +266,7 @@ emit_system_values_block(nir_block *block, fs_visitor *v)
       case nir_intrinsic_load_frag_shading_rate:
          reg = &v->nir_system_values[SYSTEM_VALUE_FRAG_SHADING_RATE];
          if (reg->file == BAD_FILE)
-            *reg = *v->emit_shading_rate_setup();
+            *reg = v->emit_shading_rate_setup();
          break;
 
       default:
@@ -1656,7 +1657,8 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
       fs_reg zero = bld.vgrf(BRW_REGISTER_TYPE_F);
 
       /* The destination stride must be at least as big as the source stride. */
-      tmp16.type = BRW_REGISTER_TYPE_W;
+      tmp16.type = devinfo->ver > 7
+         ? BRW_REGISTER_TYPE_HF : BRW_REGISTER_TYPE_W;
       tmp16.stride = 2;
 
       /* Check for denormal */
@@ -3316,7 +3318,7 @@ fs_visitor::emit_non_coherent_fb_read(const fs_builder &bld, const fs_reg &dst,
     */
    if (wm_key->multisample_fbo &&
        nir_system_values[SYSTEM_VALUE_SAMPLE_ID].file == BAD_FILE)
-      nir_system_values[SYSTEM_VALUE_SAMPLE_ID] = *emit_sampleid_setup();
+      nir_system_values[SYSTEM_VALUE_SAMPLE_ID] = emit_sampleid_setup();
 
    const fs_reg sample = nir_system_values[SYSTEM_VALUE_SAMPLE_ID];
    const fs_reg mcs = wm_key->multisample_fbo ?
@@ -3440,10 +3442,11 @@ fs_visitor::nir_emit_fs_intrinsic(const fs_builder &bld,
    switch (instr->intrinsic) {
    case nir_intrinsic_load_front_face:
       bld.MOV(retype(dest, BRW_REGISTER_TYPE_D),
-              *emit_frontfacing_interpolation());
+              emit_frontfacing_interpolation());
       break;
 
-   case nir_intrinsic_load_sample_pos: {
+   case nir_intrinsic_load_sample_pos:
+   case nir_intrinsic_load_sample_pos_or_center: {
       fs_reg sample_pos = nir_system_values[SYSTEM_VALUE_SAMPLE_POS];
       assert(sample_pos.file != BAD_FILE);
       dest.type = sample_pos.type;
@@ -6105,6 +6108,11 @@ fs_visitor::nir_emit_texture(const fs_builder &bld, nir_tex_instr *instr)
          if (brw_texture_offset(instr, i, &offset_bits)) {
             header_bits |= offset_bits;
          } else {
+            /* On gfx12.5+, if the offsets are not both constant and in the
+             * {-8,7} range, nir_lower_tex() will have already lowered the
+             * source offset. So we should never reach this point.
+             */
+            assert(devinfo->verx10 < 125);
             srcs[TEX_LOGICAL_SRC_TG4_OFFSET] =
                retype(src, BRW_REGISTER_TYPE_D);
          }

@@ -38,7 +38,6 @@
 
 #include "st_context.h"
 #include "st_atom.h"
-#include "st_cb_bufferobjects.h"
 #include "st_draw.h"
 #include "st_program.h"
 
@@ -109,7 +108,7 @@ setup_arrays(struct st_context *st,
          /* Set the vertex buffer. */
          if (binding->BufferObj) {
             vbuffer[bufidx].buffer.resource =
-               st_get_buffer_reference(ctx, binding->BufferObj);
+               _mesa_get_bufferobj_reference(ctx, binding->BufferObj);
             vbuffer[bufidx].is_user_buffer = false;
             vbuffer[bufidx].buffer_offset = binding->Offset +
                                             attrib->RelativeOffset;
@@ -142,7 +141,7 @@ setup_arrays(struct st_context *st,
       if (binding->BufferObj) {
          /* Set the binding */
          vbuffer[bufidx].buffer.resource =
-            st_get_buffer_reference(ctx, binding->BufferObj);
+            _mesa_get_bufferobj_reference(ctx, binding->BufferObj);
          vbuffer[bufidx].is_user_buffer = false;
          vbuffer[bufidx].buffer_offset = _mesa_draw_binding_offset(binding);
       } else {
@@ -414,7 +413,7 @@ st_create_gallium_vertex_state(struct gl_context *ctx,
       screen->create_vertex_state(screen, &vbuffer[0], velements.velems,
                                   velements.count,
                                   indexbuf ?
-                                    st_buffer_object(indexbuf)->buffer : NULL,
+                                  indexbuf->buffer : NULL,
                                   enabled_attribs);
 
    for (unsigned i = 0; i < num_vbuffers; i++)

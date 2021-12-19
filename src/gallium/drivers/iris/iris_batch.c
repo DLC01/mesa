@@ -107,13 +107,13 @@ dump_bo_list(struct iris_batch *batch)
       bool exported = iris_bo_is_exported(bo);
       bool imported = iris_bo_is_imported(bo);
 
-      fprintf(stderr, "[%2d]: %3d (%3d) %-14s @ 0x%016"PRIx64" (%-6s %8"PRIu64"B) %2d refs %s%s%s\n",
+      fprintf(stderr, "[%2d]: %3d (%3d) %-14s @ 0x%016"PRIx64" (%-15s %8"PRIu64"B) %2d refs %s%s%s\n",
               i,
               bo->gem_handle,
               backing->gem_handle,
               bo->name,
               bo->address,
-              backing->real.local ? "local" : "system",
+              iris_heap_to_string[backing->real.heap],
               bo->size,
               bo->refcount,
               written ? " write" : "",

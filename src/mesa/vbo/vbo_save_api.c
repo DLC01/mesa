@@ -110,7 +110,6 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "main/macros.h"
 #include "main/draw_validate.h"
 #include "main/api_arrayelt.h"
-#include "main/vtxfmt.h"
 #include "main/dispatch.h"
 #include "main/state.h"
 #include "main/varray.h"
@@ -121,10 +120,9 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "gallium/include/pipe/p_state.h"
 
-#include "vbo_noop.h"
 #include "vbo_private.h"
-
-#include "state_tracker/st_cb_bufferobjects.h"
+#include "api_exec_decl.h"
+#include "api_save.h"
 
 #ifdef ERROR
 #undef ERROR
@@ -141,14 +139,6 @@ _save_EvalCoord1f(GLfloat u);
 
 static void GLAPIENTRY
 _save_EvalCoord2f(GLfloat u, GLfloat v);
-
-static void
-handle_out_of_memory(struct gl_context *ctx)
-{
-   struct vbo_save_context *save = &vbo_context(ctx)->save;
-   _mesa_noop_vtxfmt_init(ctx, &save->vtxfmt);
-   save->out_of_memory = true;
-}
 
 /*
  * NOTE: Old 'parity' issue is gone, but copying can still be
@@ -426,9 +416,8 @@ grow_vertex_storage(struct gl_context *ctx, int vertex_count)
       save->vertex_store->buffer_in_ram = realloc(save->vertex_store->buffer_in_ram,
                                                   save->vertex_store->buffer_in_ram_size);
       if (save->vertex_store->buffer_in_ram == NULL)
-         handle_out_of_memory(ctx);
+         save->out_of_memory = true;
    }
-
 }
 
 struct vertex_key {
@@ -568,7 +557,7 @@ compile_vertex_list(struct gl_context *ctx)
                    current_size * sizeof(GLfloat));
          } else {
             _mesa_error(ctx, GL_OUT_OF_MEMORY, "Current value allocation");
-            handle_out_of_memory(ctx);
+            save->out_of_memory = true;
          }
       }
    }
@@ -777,18 +766,18 @@ compile_vertex_list(struct gl_context *ctx)
    if (total_bytes_needed > available_bytes) {
       if (save->current_bo)
          _mesa_reference_buffer_object(ctx, &save->current_bo, NULL);
-      save->current_bo = st_bufferobj_alloc(ctx, VBO_BUF_ID + 1);
-      bool success = st_bufferobj_data(ctx,
-                                       GL_ELEMENT_ARRAY_BUFFER_ARB,
-                                       MAX2(total_bytes_needed, VBO_SAVE_BUFFER_SIZE),
-                                       NULL,
-                                       GL_STATIC_DRAW_ARB, GL_MAP_WRITE_BIT |
-                                       MESA_GALLIUM_VERTEX_STATE_STORAGE,
-                                       save->current_bo);
+      save->current_bo = _mesa_bufferobj_alloc(ctx, VBO_BUF_ID + 1);
+      bool success = _mesa_bufferobj_data(ctx,
+                                          GL_ELEMENT_ARRAY_BUFFER_ARB,
+                                          MAX2(total_bytes_needed, VBO_SAVE_BUFFER_SIZE),
+                                          NULL,
+                                          GL_STATIC_DRAW_ARB, GL_MAP_WRITE_BIT |
+                                          MESA_GALLIUM_VERTEX_STATE_STORAGE,
+                                          save->current_bo);
       if (!success) {
          _mesa_reference_buffer_object(ctx, &save->current_bo, NULL);
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "IB allocation");
-         handle_out_of_memory(ctx);
+         save->out_of_memory = true;
       } else {
          save->current_bo_bytes_used = 0;
          available_bytes = save->current_bo->Size;
@@ -833,11 +822,11 @@ compile_vertex_list(struct gl_context *ctx)
    _mesa_reference_buffer_object(ctx, &node->cold->ib.obj, save->current_bo);
 
    /* Upload the vertices first (see buffer_offset) */
-   st_bufferobj_subdata(ctx,
-                        save->current_bo_bytes_used,
-                        total_vert_count * save->vertex_size * sizeof(fi_type),
-                        vertex_to_index ? temp_vertices_buffer : save->vertex_store->buffer_in_ram,
-                        node->cold->ib.obj);
+   _mesa_bufferobj_subdata(ctx,
+                           save->current_bo_bytes_used,
+                           total_vert_count * save->vertex_size * sizeof(fi_type),
+                           vertex_to_index ? temp_vertices_buffer : save->vertex_store->buffer_in_ram,
+                           node->cold->ib.obj);
    save->current_bo_bytes_used += total_vert_count * save->vertex_size * sizeof(fi_type);
 
   if (vertex_to_index) {
@@ -855,11 +844,11 @@ compile_vertex_list(struct gl_context *ctx)
 
    /* Then upload the indices. */
    if (node->cold->ib.obj) {
-      st_bufferobj_subdata(ctx,
-                           save->current_bo_bytes_used,
-                           idx * sizeof(uint32_t),
-                           indices,
-                           node->cold->ib.obj);
+      _mesa_bufferobj_subdata(ctx,
+                              save->current_bo_bytes_used,
+                              idx * sizeof(uint32_t),
+                              indices,
+                              node->cold->ib.obj);
       save->current_bo_bytes_used += idx * sizeof(uint32_t);
    } else {
       node->cold->vertex_count = 0;
@@ -910,16 +899,16 @@ end:
    node->draw_begins = node->cold->prims[0].begin;
 
    if (!save->current_bo) {
-      save->current_bo = st_bufferobj_alloc(ctx, VBO_BUF_ID + 1);
-      bool success = st_bufferobj_data(ctx,
-                                       GL_ELEMENT_ARRAY_BUFFER_ARB,
-                                       VBO_SAVE_BUFFER_SIZE,
-                                       NULL,
-                                       GL_STATIC_DRAW_ARB, GL_MAP_WRITE_BIT |
-                                       MESA_GALLIUM_VERTEX_STATE_STORAGE,
-                                       save->current_bo);
+      save->current_bo = _mesa_bufferobj_alloc(ctx, VBO_BUF_ID + 1);
+      bool success = _mesa_bufferobj_data(ctx,
+                                          GL_ELEMENT_ARRAY_BUFFER_ARB,
+                                          VBO_SAVE_BUFFER_SIZE,
+                                          NULL,
+                                          GL_STATIC_DRAW_ARB, GL_MAP_WRITE_BIT |
+                                          MESA_GALLIUM_VERTEX_STATE_STORAGE,
+                                          save->current_bo);
       if (!success)
-         handle_out_of_memory(ctx);
+         save->out_of_memory = true;
    }
 
    GLuint offsets[VBO_ATTRIB_MAX];
@@ -1407,6 +1396,10 @@ _save_Materialfv(GLenum face, GLenum pname, const GLfloat *params)
 }
 
 
+static void
+vbo_install_save_vtxfmt(struct gl_context *ctx);
+
+
 /* Cope with EvalCoord/CallList called within a begin/end object:
  *     -- Flush current buffer
  *     -- Fallback to opcodes for the rest of the begin/end object.
@@ -1438,10 +1431,10 @@ dlist_fallback(struct gl_context *ctx)
    copy_to_current(ctx);
    reset_vertex(ctx);
    if (save->out_of_memory) {
-      _mesa_install_save_vtxfmt(ctx, &save->vtxfmt);
+      vbo_install_save_vtxfmt_noop(ctx);
    }
    else {
-      _mesa_install_save_vtxfmt(ctx, &ctx->ListState.ListVtxfmt);
+      _mesa_install_save_vtxfmt(ctx);
    }
    ctx->Driver.SaveNeedFlush = GL_FALSE;
 }
@@ -1537,7 +1530,7 @@ vbo_save_NotifyBegin(struct gl_context *ctx, GLenum mode,
 
    save->no_current_update = no_current_update;
 
-   _mesa_install_save_vtxfmt(ctx, &save->vtxfmt);
+   vbo_install_save_vtxfmt(ctx);
 
    /* We need to call vbo_save_SaveFlushVertices() if there's state change */
    ctx->Driver.SaveNeedFlush = GL_TRUE;
@@ -1560,10 +1553,10 @@ _save_End(void)
     * as opcodes.
     */
    if (save->out_of_memory) {
-      _mesa_install_save_vtxfmt(ctx, &save->vtxfmt);
+      vbo_install_save_vtxfmt_noop(ctx);
    }
    else {
-      _mesa_install_save_vtxfmt(ctx, &ctx->ListState.ListVtxfmt);
+      _mesa_install_save_vtxfmt(ctx);
    }
 }
 
@@ -1606,8 +1599,8 @@ _save_PrimitiveRestartNV(void)
  * suspected to be outside any begin/end primitive.
  * Note: OBE = Outside Begin/End
  */
-static void GLAPIENTRY
-_save_OBE_Rectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2)
+void GLAPIENTRY
+save_Rectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2)
 {
    GET_CURRENT_CONTEXT(ctx);
    struct _glapi_table *dispatch = ctx->CurrentServerDispatch;
@@ -1621,50 +1614,44 @@ _save_OBE_Rectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2)
 }
 
 
-static void GLAPIENTRY
-_save_OBE_Rectd(GLdouble x1, GLdouble y1, GLdouble x2, GLdouble y2)
+void GLAPIENTRY
+save_Rectdv(const GLdouble *v1, const GLdouble *v2)
 {
-   _save_OBE_Rectf((GLfloat) x1, (GLfloat) y1, (GLfloat) x2, (GLfloat) y2);
+   save_Rectf((GLfloat) v1[0], (GLfloat) v1[1], (GLfloat) v2[0], (GLfloat) v2[1]);
 }
 
-static void GLAPIENTRY
-_save_OBE_Rectdv(const GLdouble *v1, const GLdouble *v2)
+void GLAPIENTRY
+save_Rectfv(const GLfloat *v1, const GLfloat *v2)
 {
-   _save_OBE_Rectf((GLfloat) v1[0], (GLfloat) v1[1], (GLfloat) v2[0], (GLfloat) v2[1]);
+   save_Rectf(v1[0], v1[1], v2[0], v2[1]);
 }
 
-static void GLAPIENTRY
-_save_OBE_Rectfv(const GLfloat *v1, const GLfloat *v2)
+void GLAPIENTRY
+save_Recti(GLint x1, GLint y1, GLint x2, GLint y2)
 {
-   _save_OBE_Rectf(v1[0], v1[1], v2[0], v2[1]);
+   save_Rectf((GLfloat) x1, (GLfloat) y1, (GLfloat) x2, (GLfloat) y2);
 }
 
-static void GLAPIENTRY
-_save_OBE_Recti(GLint x1, GLint y1, GLint x2, GLint y2)
+void GLAPIENTRY
+save_Rectiv(const GLint *v1, const GLint *v2)
 {
-   _save_OBE_Rectf((GLfloat) x1, (GLfloat) y1, (GLfloat) x2, (GLfloat) y2);
+   save_Rectf((GLfloat) v1[0], (GLfloat) v1[1], (GLfloat) v2[0], (GLfloat) v2[1]);
 }
 
-static void GLAPIENTRY
-_save_OBE_Rectiv(const GLint *v1, const GLint *v2)
+void GLAPIENTRY
+save_Rects(GLshort x1, GLshort y1, GLshort x2, GLshort y2)
 {
-   _save_OBE_Rectf((GLfloat) v1[0], (GLfloat) v1[1], (GLfloat) v2[0], (GLfloat) v2[1]);
+   save_Rectf((GLfloat) x1, (GLfloat) y1, (GLfloat) x2, (GLfloat) y2);
 }
 
-static void GLAPIENTRY
-_save_OBE_Rects(GLshort x1, GLshort y1, GLshort x2, GLshort y2)
+void GLAPIENTRY
+save_Rectsv(const GLshort *v1, const GLshort *v2)
 {
-   _save_OBE_Rectf((GLfloat) x1, (GLfloat) y1, (GLfloat) x2, (GLfloat) y2);
+   save_Rectf((GLfloat) v1[0], (GLfloat) v1[1], (GLfloat) v2[0], (GLfloat) v2[1]);
 }
 
-static void GLAPIENTRY
-_save_OBE_Rectsv(const GLshort *v1, const GLshort *v2)
-{
-   _save_OBE_Rectf((GLfloat) v1[0], (GLfloat) v1[1], (GLfloat) v2[0], (GLfloat) v2[1]);
-}
-
-static void GLAPIENTRY
-_save_OBE_DrawArrays(GLenum mode, GLint start, GLsizei count)
+void GLAPIENTRY
+save_DrawArrays(GLenum mode, GLint start, GLsizei count)
 {
    GET_CURRENT_CONTEXT(ctx);
    struct gl_vertex_array_object *vao = ctx->Array.VAO;
@@ -1700,9 +1687,9 @@ _save_OBE_DrawArrays(GLenum mode, GLint start, GLsizei count)
 }
 
 
-static void GLAPIENTRY
-_save_OBE_MultiDrawArrays(GLenum mode, const GLint *first,
-                          const GLsizei *count, GLsizei primcount)
+void GLAPIENTRY
+save_MultiDrawArrays(GLenum mode, const GLint *first,
+                      const GLsizei *count, GLsizei primcount)
 {
    GET_CURRENT_CONTEXT(ctx);
    GLint i;
@@ -1732,7 +1719,7 @@ _save_OBE_MultiDrawArrays(GLenum mode, const GLint *first,
 
    for (i = 0; i < primcount; i++) {
       if (count[i] > 0) {
-         _save_OBE_DrawArrays(mode, first[i], count[i]);
+         save_DrawArrays(mode, first[i], count[i]);
       }
    }
 }
@@ -1764,9 +1751,9 @@ array_element(struct gl_context *ctx,
 /* Could do better by copying the arrays and element list intact and
  * then emitting an indexed prim at runtime.
  */
-static void GLAPIENTRY
-_save_OBE_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
-                                 const GLvoid * indices, GLint basevertex)
+void GLAPIENTRY
+save_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
+                             const GLvoid * indices, GLint basevertex)
 {
    GET_CURRENT_CONTEXT(ctx);
    struct vbo_save_context *save = &vbo_context(ctx)->save;
@@ -1828,16 +1815,16 @@ _save_OBE_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
    _mesa_vao_unmap(ctx, vao);
 }
 
-static void GLAPIENTRY
-_save_OBE_DrawElements(GLenum mode, GLsizei count, GLenum type,
-                       const GLvoid * indices)
+void GLAPIENTRY
+save_DrawElements(GLenum mode, GLsizei count, GLenum type,
+                   const GLvoid * indices)
 {
-   _save_OBE_DrawElementsBaseVertex(mode, count, type, indices, 0);
+   save_DrawElementsBaseVertex(mode, count, type, indices, 0);
 }
 
 
-static void GLAPIENTRY
-_save_OBE_DrawRangeElements(GLenum mode, GLuint start, GLuint end,
+void GLAPIENTRY
+save_DrawRangeElements(GLenum mode, GLuint start, GLuint end,
                             GLsizei count, GLenum type,
                             const GLvoid * indices)
 {
@@ -1868,13 +1855,13 @@ _save_OBE_DrawRangeElements(GLenum mode, GLuint start, GLuint end,
    if (save->out_of_memory)
       return;
 
-   _save_OBE_DrawElements(mode, count, type, indices);
+   save_DrawElements(mode, count, type, indices);
 }
 
 
-static void GLAPIENTRY
-_save_OBE_MultiDrawElements(GLenum mode, const GLsizei *count, GLenum type,
-                            const GLvoid * const *indices, GLsizei primcount)
+void GLAPIENTRY
+save_MultiDrawElementsEXT(GLenum mode, const GLsizei *count, GLenum type,
+                           const GLvoid * const *indices, GLsizei primcount)
 {
    GET_CURRENT_CONTEXT(ctx);
    struct _glapi_table *dispatch = ctx->CurrentServerDispatch;
@@ -1894,12 +1881,12 @@ _save_OBE_MultiDrawElements(GLenum mode, const GLsizei *count, GLenum type,
 }
 
 
-static void GLAPIENTRY
-_save_OBE_MultiDrawElementsBaseVertex(GLenum mode, const GLsizei *count,
-                                      GLenum type,
-                                      const GLvoid * const *indices,
-                                      GLsizei primcount,
-                                      const GLint *basevertex)
+void GLAPIENTRY
+save_MultiDrawElementsBaseVertex(GLenum mode, const GLsizei *count,
+                                  GLenum type,
+                                  const GLvoid * const *indices,
+                                  GLsizei primcount,
+                                  const GLint *basevertex)
 {
    GET_CURRENT_CONTEXT(ctx);
    struct _glapi_table *dispatch = ctx->CurrentServerDispatch;
@@ -1922,47 +1909,16 @@ _save_OBE_MultiDrawElementsBaseVertex(GLenum mode, const GLsizei *count,
 
 
 static void
-vtxfmt_init(struct gl_context *ctx)
+vbo_install_save_vtxfmt(struct gl_context *ctx)
 {
-   struct vbo_save_context *save = &vbo_context(ctx)->save;
-   GLvertexformat *vfmt = &save->vtxfmt;
-
-#define NAME_AE(x) _ae_##x
+#define NAME_AE(x) _mesa_##x
 #define NAME_CALLLIST(x) _save_##x
 #define NAME(x) _save_##x
-#define NAME_ES(x) _save_##x##ARB
+#define NAME_ES(x) _save_##x
 
-#include "vbo_init_tmp.h"
+   struct _glapi_table *tab = ctx->Save;
+   #include "api_vtxfmt_init.h"
 }
-
-
-/**
- * Initialize the dispatch table with the VBO functions for display
- * list compilation.
- */
-void
-vbo_initialize_save_dispatch(const struct gl_context *ctx,
-                             struct _glapi_table *exec)
-{
-   SET_DrawArrays(exec, _save_OBE_DrawArrays);
-   SET_MultiDrawArrays(exec, _save_OBE_MultiDrawArrays);
-   SET_DrawElements(exec, _save_OBE_DrawElements);
-   SET_DrawElementsBaseVertex(exec, _save_OBE_DrawElementsBaseVertex);
-   SET_DrawRangeElements(exec, _save_OBE_DrawRangeElements);
-   SET_MultiDrawElementsEXT(exec, _save_OBE_MultiDrawElements);
-   SET_MultiDrawElementsBaseVertex(exec, _save_OBE_MultiDrawElementsBaseVertex);
-   SET_Rectf(exec, _save_OBE_Rectf);
-   SET_Rectd(exec, _save_OBE_Rectd);
-   SET_Rectdv(exec, _save_OBE_Rectdv);
-   SET_Rectfv(exec, _save_OBE_Rectfv);
-   SET_Recti(exec, _save_OBE_Recti);
-   SET_Rectiv(exec, _save_OBE_Rectiv);
-   SET_Rects(exec, _save_OBE_Rects);
-   SET_Rectsv(exec, _save_OBE_Rectsv);
-
-   /* Note: other glDraw functins aren't compiled into display lists */
-}
-
 
 
 void
@@ -2034,7 +1990,7 @@ vbo_save_EndList(struct gl_context *ctx)
        * etc. received between here and the next begin will be compiled
        * as opcodes.
        */
-      _mesa_install_save_vtxfmt(ctx, &ctx->ListState.ListVtxfmt);
+      _mesa_install_save_vtxfmt(ctx);
    }
 
    assert(save->vertex_size == 0);
@@ -2073,6 +2029,5 @@ vbo_save_api_init(struct vbo_save_context *save)
 {
    struct gl_context *ctx = gl_context_from_vbo_save(save);
 
-   vtxfmt_init(ctx);
    current_init(ctx);
 }
