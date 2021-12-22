@@ -2325,7 +2325,7 @@ panfrost_emit_vertex_tiler_jobs(struct panfrost_batch *batch,
                                            batch->indirect_draw_job_id : 0,
                                            0, vertex_job, false);
 
-        if (ctx->rasterizer->base.rasterizer_discard || batch->scissor_culls_everything)
+        if (panfrost_batch_skip_rasterization(batch))
                 return;
 
         panfrost_add_job(&batch->pool.base, &batch->scoreboard,
@@ -2524,6 +2524,24 @@ panfrost_translate_index_size(unsigned size)
 }
 
 static void
+panfrost_draw_emit_vertex_section(struct panfrost_batch *batch,
+                                  mali_ptr vs_vary, mali_ptr varyings,
+                                  mali_ptr attribs, mali_ptr attrib_bufs,
+                                  void *section)
+{
+        pan_pack(section, DRAW, cfg) {
+                cfg.draw_descriptor_is_64b = true;
+                cfg.state = batch->rsd[PIPE_SHADER_VERTEX];
+                cfg.attributes = attribs;
+                cfg.attribute_buffers = attrib_bufs;
+                cfg.varyings = vs_vary;
+                cfg.varying_buffers = vs_vary ? varyings : 0;
+                cfg.thread_storage = batch->tls.gpu;
+                pan_emit_draw_descs(batch, &cfg, PIPE_SHADER_VERTEX);
+        }
+}
+
+static void
 panfrost_draw_emit_vertex(struct panfrost_batch *batch,
                           const struct pipe_draw_info *info,
                           void *invocation_template,
@@ -2539,16 +2557,9 @@ panfrost_draw_emit_vertex(struct panfrost_batch *batch,
                 cfg.job_task_split = 5;
         }
 
-        pan_section_pack(job, COMPUTE_JOB, DRAW, cfg) {
-                cfg.draw_descriptor_is_64b = true;
-                cfg.state = batch->rsd[PIPE_SHADER_VERTEX];
-                cfg.attributes = attribs;
-                cfg.attribute_buffers = attrib_bufs;
-                cfg.varyings = vs_vary;
-                cfg.varying_buffers = vs_vary ? varyings : 0;
-                cfg.thread_storage = batch->tls.gpu;
-                pan_emit_draw_descs(batch, &cfg, PIPE_SHADER_VERTEX);
-        }
+        section = pan_section_ptr(job, COMPUTE_JOB, DRAW);
+        panfrost_draw_emit_vertex_section(batch, vs_vary, varyings,
+                                          attribs, attrib_bufs, section);
 }
 
 static void
@@ -2679,7 +2690,8 @@ panfrost_draw_emit_tiler(struct panfrost_batch *batch,
                          const struct pipe_draw_start_count_bias *draw,
                          void *invocation_template,
                          mali_ptr indices, mali_ptr fs_vary, mali_ptr varyings,
-                         mali_ptr pos, mali_ptr psiz, void *job)
+                         mali_ptr pos, mali_ptr psiz, bool secondary_shader,
+                         void *job)
 {
         struct panfrost_context *ctx = batch->ctx;
         struct pipe_rasterizer_state *rast = &ctx->rasterizer->base;
@@ -2720,6 +2732,10 @@ panfrost_draw_emit_tiler(struct panfrost_batch *batch,
                         cfg.indices = indices;
                         cfg.base_vertex_offset = draw->index_bias - ctx->offset_start;
                 }
+
+#if PAN_ARCH >= 6
+                cfg.secondary_shader = secondary_shader;
+#endif
         }
 
         bool points = info->mode == PIPE_PRIM_POINTS;
@@ -2799,10 +2815,23 @@ panfrost_direct_draw(struct panfrost_batch *batch,
         ctx->active_prim = info->mode;
         ctx->drawid = drawid_offset;
 
-        struct panfrost_ptr tiler =
-                pan_pool_alloc_desc(&batch->pool.base, TILER_JOB);
-        struct panfrost_ptr vertex =
-                pan_pool_alloc_desc(&batch->pool.base, COMPUTE_JOB);
+        struct panfrost_shader_state *vs = panfrost_get_shader_state(ctx, PIPE_SHADER_VERTEX);
+
+        bool idvs = vs->info.vs.idvs;
+        bool secondary_shader = vs->info.vs.secondary_enable;
+
+        struct panfrost_ptr tiler, vertex;
+
+        if (idvs) {
+#if PAN_ARCH >= 6
+                tiler = pan_pool_alloc_desc(&batch->pool.base, INDEXED_VERTEX_JOB);
+#else
+                unreachable("IDVS is unsupported on Midgard");
+#endif
+        } else {
+                vertex = pan_pool_alloc_desc(&batch->pool.base, COMPUTE_JOB);
+                tiler = pan_pool_alloc_desc(&batch->pool.base, TILER_JOB);
+        }
 
         unsigned vertex_count = ctx->vertex_count;
 
@@ -2821,9 +2850,19 @@ panfrost_direct_draw(struct panfrost_batch *batch,
                 ctx->offset_start = draw->start;
         }
 
-        if (info->instance_count > 1)
-                ctx->padded_count = panfrost_padded_vertex_count(vertex_count);
-        else
+        if (info->instance_count > 1) {
+                unsigned count = vertex_count;
+
+                /* Index-Driven Vertex Shading requires different instances to
+                 * have different cache lines for position results. Each vertex
+                 * position is 16 bytes and the Mali cache line is 64 bytes, so
+                 * the instance count must be aligned to 4 vertices.
+                 */
+                if (idvs)
+                        count = ALIGN_POT(count, 4);
+
+                ctx->padded_count = panfrost_padded_vertex_count(count);
+        } else
                 ctx->padded_count = vertex_count;
 
         panfrost_statistics_record(ctx, info, draw);
@@ -2864,11 +2903,26 @@ panfrost_direct_draw(struct panfrost_batch *batch,
         panfrost_clean_state_3d(ctx);
 
         /* Fire off the draw itself */
-        panfrost_draw_emit_vertex(batch, info, &invocation,
-                                  vs_vary, varyings, attribs, attrib_bufs, vertex.cpu);
         panfrost_draw_emit_tiler(batch, info, draw, &invocation, indices,
-                                 fs_vary, varyings, pos, psiz, tiler.cpu);
-        panfrost_emit_vertex_tiler_jobs(batch, &vertex, &tiler);
+                                 fs_vary, varyings, pos, psiz, secondary_shader,
+                                 tiler.cpu);
+
+        if (idvs) {
+#if PAN_ARCH >= 6
+                panfrost_draw_emit_vertex_section(batch,
+                                  vs_vary, varyings,
+                                  attribs, attrib_bufs,
+                                  pan_section_ptr(tiler.cpu, INDEXED_VERTEX_JOB, VERTEX_DRAW));
+
+                panfrost_add_job(&batch->pool.base, &batch->scoreboard,
+                                 MALI_JOB_TYPE_INDEXED_VERTEX, false, false,
+                                 0, 0, &tiler, false);
+#endif
+        } else {
+                panfrost_draw_emit_vertex(batch, info, &invocation,
+                                          vs_vary, varyings, attribs, attrib_bufs, vertex.cpu);
+                panfrost_emit_vertex_tiler_jobs(batch, &vertex, &tiler);
+        }
 
         /* Increment transform feedback offsets */
         panfrost_update_streamout_offsets(ctx);
@@ -2896,13 +2950,23 @@ panfrost_indirect_draw(struct panfrost_batch *batch,
         ctx->drawid = drawid_offset;
         ctx->indirect_draw = true;
 
-        struct panfrost_ptr tiler =
-                pan_pool_alloc_desc(&batch->pool.base, TILER_JOB);
-        struct panfrost_ptr vertex =
-                pan_pool_alloc_desc(&batch->pool.base, COMPUTE_JOB);
+        struct panfrost_shader_state *vs = panfrost_get_shader_state(ctx, PIPE_SHADER_VERTEX);
 
-        struct panfrost_shader_state *vs =
-                panfrost_get_shader_state(ctx, PIPE_SHADER_VERTEX);
+        bool idvs = vs->info.vs.idvs;
+        bool secondary_shader = vs->info.vs.secondary_enable;
+
+        struct panfrost_ptr tiler = { 0 }, vertex = { 0 };
+
+        if (idvs) {
+#if PAN_ARCH >= 6
+                tiler = pan_pool_alloc_desc(&batch->pool.base, INDEXED_VERTEX_JOB);
+#else
+                unreachable("IDVS is unsupported on Midgard");
+#endif
+        } else {
+                vertex = pan_pool_alloc_desc(&batch->pool.base, COMPUTE_JOB);
+                tiler = pan_pool_alloc_desc(&batch->pool.base, TILER_JOB);
+        }
 
         struct panfrost_bo *index_buf = NULL;
 
@@ -2948,11 +3012,21 @@ panfrost_indirect_draw(struct panfrost_batch *batch,
         static struct mali_invocation_packed invocation;
 
         /* Fire off the draw itself */
-        panfrost_draw_emit_vertex(batch, info, &invocation, vs_vary, varyings,
-                                  attribs, attrib_bufs, vertex.cpu);
         panfrost_draw_emit_tiler(batch, info, draw, &invocation,
                                  index_buf ? index_buf->ptr.gpu : 0,
-                                 fs_vary, varyings, pos, psiz, tiler.cpu);
+                                 fs_vary, varyings, pos, psiz, secondary_shader,
+                                 tiler.cpu);
+        if (idvs) {
+#if PAN_ARCH >= 6
+                panfrost_draw_emit_vertex_section(batch,
+                                  vs_vary, varyings,
+                                  attribs, attrib_bufs,
+                                  pan_section_ptr(tiler.cpu, INDEXED_VERTEX_JOB, VERTEX_DRAW));
+#endif
+        } else {
+                panfrost_draw_emit_vertex(batch, info, &invocation,
+                                          vs_vary, varyings, attribs, attrib_bufs, vertex.cpu);
+        }
 
         /* Add the varying heap BO to the batch if we're allocating varyings. */
         if (varyings) {
@@ -2994,6 +3068,8 @@ panfrost_indirect_draw(struct panfrost_batch *batch,
         if (vs->info.vs.writes_point_size)
                 draw_info.flags |= PAN_INDIRECT_DRAW_HAS_PSIZ;
 
+        if (idvs)
+                draw_info.flags |= PAN_INDIRECT_DRAW_IDVS;
 
         if (info->primitive_restart) {
                 draw_info.restart_index = info->restart_index;
@@ -3006,7 +3082,13 @@ panfrost_indirect_draw(struct panfrost_batch *batch,
                                                   &draw_info,
                                                   &batch->indirect_draw_ctx);
 
-        panfrost_emit_vertex_tiler_jobs(batch, &vertex, &tiler);
+        if (idvs) {
+                panfrost_add_job(&batch->pool.base, &batch->scoreboard,
+                                 MALI_JOB_TYPE_INDEXED_VERTEX, false, false,
+                                 0, 0, &tiler, false);
+        } else {
+                panfrost_emit_vertex_tiler_jobs(batch, &vertex, &tiler);
+        }
 }
 #endif
 
@@ -3033,6 +3115,22 @@ panfrost_draw_vbo(struct pipe_context *pipe,
 
         /* Do some common setup */
         struct panfrost_batch *batch = panfrost_get_batch_for_fbo(ctx);
+
+        /* If rasterization discard is enabled but the vertex shader does not
+         * have side effects (including transform feedback), skip the draw
+         * altogether. This is always an optimization. Additionally, this is
+         * required for Index-Driven Vertex Shading, since IDVS always
+         * rasterizes. The compiler will not use IDVS if the vertex shader has
+         * side effects. So the only problem case is rasterizer discard with a
+         * shader without side effects -- but these draws are useless.
+         */
+        if (panfrost_batch_skip_rasterization(batch)) {
+                struct panfrost_shader_state *vs =
+                        panfrost_get_shader_state(ctx, PIPE_SHADER_VERTEX);
+
+                if (!vs->info.writes_global)
+                        return;
+        }
 
         /* Don't add too many jobs to a single batch. Hardware has a hard limit
          * of 65536 jobs, but we choose a smaller soft limit (arbitrary) to

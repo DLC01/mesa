@@ -32,9 +32,10 @@
 #include "main/glformats.h"
 #include "main/state.h"
 #include "api_exec_decl.h"
+#include "main/framebuffer.h"
 
 #include "state_tracker/st_format.h"
-#include "state_tracker/st_cb_msaa.h"
+#include "state_tracker/st_context.h"
 
 /**
  * Called via glSampleCoverageARB
@@ -80,6 +81,23 @@ _mesa_init_multisample(struct gl_context *ctx)
    ctx->Multisample.SampleMaskValue = ~(GLbitfield)0;
 }
 
+static void
+get_sample_position(struct gl_context *ctx,
+                    struct gl_framebuffer *fb,
+                    GLuint index,
+                    GLfloat *outPos)
+{
+   struct st_context *st = st_context(ctx);
+
+   st_validate_state(st, ST_PIPELINE_UPDATE_FRAMEBUFFER);
+
+   if (ctx->pipe->get_sample_position)
+      ctx->pipe->get_sample_position(ctx->pipe,
+                                     _mesa_geometric_samples(fb),
+                                     index, outPos);
+   else
+      outPos[0] = outPos[1] = 0.5f;
+}
 
 void GLAPIENTRY
 _mesa_GetMultisamplefv(GLenum pname, GLuint index, GLfloat * val)
@@ -97,7 +115,7 @@ _mesa_GetMultisamplefv(GLenum pname, GLuint index, GLfloat * val)
          return;
       }
 
-      st_GetSamplePosition(ctx, ctx->DrawBuffer, index, val);
+      get_sample_position(ctx, ctx->DrawBuffer, index, val);
 
       /* FBOs can be upside down (winsys always are)*/
       if (ctx->DrawBuffer->FlipY)
@@ -387,5 +405,31 @@ _mesa_AlphaToCoverageDitherControlNV(GLenum mode)
          break;
       default:
          _mesa_error(ctx, GL_INVALID_ENUM, "glAlphaToCoverageDitherControlNV(invalid parameter)");
+   }
+}
+
+void
+_mesa_GetProgrammableSampleCaps(struct gl_context *ctx, const struct gl_framebuffer *fb,
+                                GLuint *outBits, GLuint *outWidth, GLuint *outHeight)
+{
+   struct st_context *st = st_context(ctx);
+   struct pipe_screen *screen = ctx->pipe->screen;
+
+   st_validate_state(st, ST_PIPELINE_UPDATE_FRAMEBUFFER);
+
+   *outBits = 4;
+   *outWidth = 1;
+   *outHeight = 1;
+
+   if (ctx->Extensions.ARB_sample_locations)
+      screen->get_sample_pixel_grid(screen, st->state.fb_num_samples,
+                                    outWidth, outHeight);
+
+   /* We could handle this better in some circumstances,
+    * but it's not really an issue */
+   if (*outWidth > MAX_SAMPLE_LOCATION_GRID_SIZE ||
+       *outHeight > MAX_SAMPLE_LOCATION_GRID_SIZE) {
+      *outWidth = 1;
+      *outHeight = 1;
    }
 }

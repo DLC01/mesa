@@ -2388,10 +2388,6 @@ do_common_optimization(exec_list *ir, bool linked,
    if (options->OptimizeForAOS && !linked)
       OPT(opt_flip_matrices, ir);
 
-   if (linked && options->OptimizeForAOS) {
-      OPT(do_vectorize, ir);
-   }
-
    if (linked)
       OPT(do_dead_code, ir, uniform_locations_assigned);
    else
@@ -2426,8 +2422,6 @@ do_common_optimization(exec_list *ir, bool linked,
    if (array_split)
       do_constant_propagation(ir);
    progress |= array_split;
-
-   OPT(optimize_redundant_jumps, ir);
 
    if (options->MaxUnrollIterations) {
       loop_state *ls = analyze_loop_variables(ir);

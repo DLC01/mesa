@@ -860,6 +860,72 @@ get_constant_op(opt_ctx& ctx, ssa_info info, uint32_t bits)
    return Operand::get_const(ctx.program->chip_class, info.val, bits / 8u);
 }
 
+void
+propagate_constants_vop3p(opt_ctx& ctx, aco_ptr<Instruction>& instr, ssa_info& info, unsigned i)
+{
+   if (!info.is_constant_or_literal(32))
+      return;
+
+   assert(instr->operands[i].isTemp());
+   unsigned bits = get_operand_size(instr, i);
+   if (info.is_constant(bits)) {
+      instr->operands[i] = get_constant_op(ctx, info, bits);
+      return;
+   }
+
+   /* try to fold inline constants */
+   VOP3P_instruction* vop3p = &instr->vop3p();
+   Operand const_lo = Operand::c16(info.val);
+   Operand const_hi = Operand::c16(info.val >> 16);
+   bool opsel_lo = (vop3p->opsel_lo >> i) & 1;
+   bool opsel_hi = (vop3p->opsel_hi >> i) & 1;
+
+   if (const_hi.isLiteral() && (opsel_lo || opsel_hi))
+      return;
+   if (const_lo.isLiteral() && !(opsel_lo && opsel_hi))
+      return;
+
+   if (opsel_lo == opsel_hi) {
+      /* use the single 16bit value */
+      instr->operands[i] = opsel_lo ? const_hi : const_lo;
+
+      /* opsel must point to lo for both halves */
+      vop3p->opsel_lo &= ~(1 << i);
+      vop3p->opsel_hi &= ~(1 << i);
+   } else if (const_lo == const_hi) {
+      /* both constants are the same */
+      instr->operands[i] = const_lo;
+
+      /* opsel must point to lo for both halves */
+      vop3p->opsel_lo &= ~(1 << i);
+      vop3p->opsel_hi &= ~(1 << i);
+   } else if (const_lo == Operand::c16(0)) {
+      /* don't inline FP constants into integer instructions */
+      // TODO: check if negative integers are zero- or sign-extended
+      if (bits == 32 && const_hi.constantValue() > 64u)
+         return;
+
+      instr->operands[i] = const_hi;
+
+      /* redirect opsel selection */
+      vop3p->opsel_lo ^= (1 << i);
+      vop3p->opsel_hi ^= (1 << i);
+   } else if (bits == 16 && const_lo.constantValue() == (const_hi.constantValue() ^ (1 << 15))) {
+      /* const_lo == -const_hi */
+      if (!instr_info.can_use_input_modifiers[(int)instr->opcode])
+         return;
+
+      instr->operands[i] = Operand::c16(const_lo.constantValue() & 0x7FFF);
+      bool neg_lo = const_lo.constantValue() & (1 << 15);
+      vop3p->neg_lo[i] ^= opsel_lo ^ neg_lo;
+      vop3p->neg_hi[i] ^= opsel_hi ^ neg_lo;
+
+      /* opsel must point to lo for both operands */
+      vop3p->opsel_lo &= ~(1 << i);
+      vop3p->opsel_hi &= ~(1 << i);
+   }
+}
+
 bool
 fixed_to_exec(Operand op)
 {
@@ -1149,14 +1215,18 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
             continue;
          }
 
+         if (instr->isVOP3P()) {
+            propagate_constants_vop3p(ctx, instr, info, i);
+            continue;
+         }
+
          unsigned bits = get_operand_size(instr, i);
          if (info.is_constant(bits) && alu_can_accept_constant(instr->opcode, i) &&
              (!instr->isSDWA() || ctx.program->chip_class >= GFX9)) {
             Operand op = get_constant_op(ctx, info, bits);
             perfwarn(ctx.program, instr->opcode == aco_opcode::v_cndmask_b32 && i == 2,
                      "v_cndmask_b32 with a constant selector", instr.get());
-            if (i == 0 || instr->isSDWA() || instr->isVOP3P() ||
-                instr->opcode == aco_opcode::v_readlane_b32 ||
+            if (i == 0 || instr->isSDWA() || instr->opcode == aco_opcode::v_readlane_b32 ||
                 instr->opcode == aco_opcode::v_writelane_b32) {
                instr->format = withoutDPP(instr->format);
                instr->operands[i] = op;
@@ -3158,7 +3228,7 @@ combine_vop3p(opt_ctx& ctx, aco_ptr<Instruction>& instr)
 
          ssa_info& info = ctx.info[op.tempId()];
          if (info.is_vop3p() && info.instr->opcode == aco_opcode::v_pk_mul_f16 &&
-             info.instr->operands[1].constantEquals(0xBC00)) {
+             info.instr->operands[1].constantEquals(0x3C00)) {
             Operand ops[3];
             for (unsigned j = 0; j < instr->operands.size(); j++)
                ops[j] = instr->operands[j];
@@ -3175,10 +3245,12 @@ combine_vop3p(opt_ctx& ctx, aco_ptr<Instruction>& instr)
              * if 0 - pick selection from fneg->lo
              * if 1 - pick selection from fneg->hi
              */
-            bool opsel_lo = vop3p->opsel_lo & (1 << i);
-            bool opsel_hi = vop3p->opsel_hi & (1 << i);
-            vop3p->neg_lo[i] ^= true ^ (opsel_lo ? fneg->neg_hi[0] : fneg->neg_lo[0]);
-            vop3p->neg_hi[i] ^= true ^ (opsel_hi ? fneg->neg_hi[0] : fneg->neg_lo[0]);
+            bool opsel_lo = (vop3p->opsel_lo >> i) & 1;
+            bool opsel_hi = (vop3p->opsel_hi >> i) & 1;
+            bool neg_lo = fneg->neg_lo[0] ^ fneg->neg_lo[1];
+            bool neg_hi = fneg->neg_hi[0] ^ fneg->neg_hi[1];
+            vop3p->neg_lo[i] ^= opsel_lo ? neg_hi : neg_lo;
+            vop3p->neg_hi[i] ^= opsel_hi ? neg_hi : neg_lo;
             vop3p->opsel_lo ^= ((opsel_lo ? ~fneg->opsel_hi : fneg->opsel_lo) & 1) << i;
             vop3p->opsel_hi ^= ((opsel_hi ? ~fneg->opsel_hi : fneg->opsel_lo) & 1) << i;
 

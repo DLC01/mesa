@@ -213,6 +213,19 @@ genX(cmd_buffer_emit_state_base_address)(struct anv_cmd_buffer *cmd_buffer)
       genX(flush_pipeline_select)(cmd_buffer, gfx12_wa_pipeline);
 #endif
 
+#if GFX_VERx10 >= 125
+   anv_batch_emit(
+      &cmd_buffer->batch, GENX(3DSTATE_BINDING_TABLE_POOL_ALLOC), btpa) {
+      btpa.BindingTablePoolBaseAddress =
+         anv_cmd_buffer_surface_base_address(cmd_buffer);
+      btpa.BindingTablePoolBufferSize = BINDING_TABLE_POOL_BLOCK_SIZE / 4096;
+#if GFX_VERx10 < 125
+      btpa.BindingTablePoolEnable = true;
+#endif
+      btpa.MOCS = mocs;
+   }
+#endif
+
    /* After re-setting the surface state base address, we have to do some
     * cache flusing so that the sampler engine will pick up the new
     * SURFACE_STATE objects and binding tables. From the Broadwell PRM,
@@ -2988,7 +3001,6 @@ cmd_buffer_emit_descriptor_pointers(struct anv_cmd_buffer *cmd_buffer,
       [MESA_SHADER_TESS_EVAL]                   = 45, /* DS */
       [MESA_SHADER_GEOMETRY]                    = 46,
       [MESA_SHADER_FRAGMENT]                    = 47,
-      [MESA_SHADER_COMPUTE]                     = 0,
    };
 
    static const uint32_t binding_table_opcodes[] = {
@@ -2997,12 +3009,10 @@ cmd_buffer_emit_descriptor_pointers(struct anv_cmd_buffer *cmd_buffer,
       [MESA_SHADER_TESS_EVAL]                   = 40,
       [MESA_SHADER_GEOMETRY]                    = 41,
       [MESA_SHADER_FRAGMENT]                    = 42,
-      [MESA_SHADER_COMPUTE]                     = 0,
    };
 
    anv_foreach_stage(s, stages) {
       assert(s < ARRAY_SIZE(binding_table_opcodes));
-      assert(binding_table_opcodes[s] > 0);
 
       if (cmd_buffer->state.samplers[s].alloc_size > 0) {
          anv_batch_emit(&cmd_buffer->batch,
@@ -3177,11 +3187,9 @@ cmd_buffer_emit_push_constant(struct anv_cmd_buffer *cmd_buffer,
       [MESA_SHADER_TESS_EVAL]                   = 26, /* DS */
       [MESA_SHADER_GEOMETRY]                    = 22,
       [MESA_SHADER_FRAGMENT]                    = 23,
-      [MESA_SHADER_COMPUTE]                     = 0,
    };
 
    assert(stage < ARRAY_SIZE(push_constant_opcodes));
-   assert(push_constant_opcodes[stage] > 0);
 
    UNUSED uint32_t mocs = anv_mocs(cmd_buffer->device, NULL, 0);
 
@@ -3288,12 +3296,10 @@ cmd_buffer_emit_push_constant_all(struct anv_cmd_buffer *cmd_buffer,
       [MESA_SHADER_TESS_EVAL]                   = 26, /* DS */
       [MESA_SHADER_GEOMETRY]                    = 22,
       [MESA_SHADER_FRAGMENT]                    = 23,
-      [MESA_SHADER_COMPUTE]                     = 0,
    };
 
    gl_shader_stage stage = vk_to_mesa_shader_stage(shader_mask);
    assert(stage < ARRAY_SIZE(push_constant_opcodes));
-   assert(push_constant_opcodes[stage] > 0);
 
    const struct anv_pipeline_bind_map *bind_map =
       &pipeline->shaders[stage]->bind_map;
@@ -3746,12 +3752,14 @@ genX(cmd_buffer_flush_state)(struct anv_cmd_buffer *cmd_buffer)
        * descriptors or push constants is dirty.
        */
       dirty |= cmd_buffer->state.push_constants_dirty;
-      dirty &= ANV_STAGE_MASK & VK_SHADER_STAGE_ALL_GRAPHICS;
-      cmd_buffer_flush_push_constants(cmd_buffer, dirty);
+      cmd_buffer_flush_push_constants(cmd_buffer,
+                                      dirty & VK_SHADER_STAGE_ALL_GRAPHICS);
    }
 
-   if (dirty)
-      cmd_buffer_emit_descriptor_pointers(cmd_buffer, dirty);
+   if (dirty & VK_SHADER_STAGE_ALL_GRAPHICS) {
+      cmd_buffer_emit_descriptor_pointers(cmd_buffer,
+                                          dirty & VK_SHADER_STAGE_ALL_GRAPHICS);
+   }
 
    cmd_buffer_emit_clip(cmd_buffer);
 

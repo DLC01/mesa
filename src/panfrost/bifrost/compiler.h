@@ -619,15 +619,37 @@ typedef struct bi_block {
         uint8_t pass_flags;
 } bi_block;
 
+/* Subset of pan_shader_info needed per-variant, in order to support IDVS */
+struct bi_shader_info {
+        struct panfrost_ubo_push *push;
+        struct bifrost_shader_info *bifrost;
+        struct panfrost_sysvals *sysvals;
+        unsigned tls_size;
+        unsigned work_reg_count;
+};
+
+/* State of index-driven vertex shading for current shader */
+enum bi_idvs_mode {
+        /* IDVS not in use */
+        BI_IDVS_NONE = 0,
+
+        /* IDVS in use. Compiling a position shader */
+        BI_IDVS_POSITION = 1,
+
+        /* IDVS in use. Compiling a varying shader */
+        BI_IDVS_VARYING = 2,
+};
+
 typedef struct {
        const struct panfrost_compile_inputs *inputs;
        nir_shader *nir;
-       struct pan_shader_info *info;
+       struct bi_shader_info info;
        gl_shader_stage stage;
        struct list_head blocks; /* list of bi_block */
        struct hash_table_u64 *sysval_to_id;
        uint32_t quirks;
        unsigned arch;
+       enum bi_idvs_mode idvs;
 
        /* During NIR->BIR */
        bi_block *current_block;
