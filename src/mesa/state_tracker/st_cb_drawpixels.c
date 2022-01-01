@@ -43,7 +43,6 @@
 #include "main/pbo.h"
 #include "main/readpix.h"
 #include "main/state.h"
-#include "main/texformat.h"
 #include "main/teximage.h"
 #include "main/texstore.h"
 #include "main/glformats.h"
@@ -474,7 +473,7 @@ alloc_texture(struct st_context *st, GLsizei width, GLsizei height,
    struct pipe_resource *pt;
 
    pt = st_texture_create(st, st->internal_target, texFormat, 0,
-                          width, height, 1, 1, 0, bind);
+                          width, height, 1, 1, 0, bind, false);
 
    return pt;
 }
@@ -1319,7 +1318,7 @@ st_DrawPixels(struct gl_context *ctx, GLint x, GLint y,
       write_depth = GL_TRUE;
 
    if (write_stencil &&
-       !st->screen->get_param(st->screen, PIPE_CAP_SHADER_STENCIL_EXPORT)) {
+       !st->has_stencil_export) {
       /* software fallback */
       draw_stencil_pixels(ctx, x, y, width, height, format, type,
                           unpack, pixels);
@@ -1705,7 +1704,7 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
 
    /* fallback if the driver can't do stencil exports */
    if (type == GL_DEPTH_STENCIL &&
-      !st->screen->get_param(st->screen, PIPE_CAP_SHADER_STENCIL_EXPORT)) {
+       !st->has_stencil_export) {
       st_CopyPixels(ctx, srcx, srcy, width, height, dstx, dsty, GL_STENCIL);
       st_CopyPixels(ctx, srcx, srcy, width, height, dstx, dsty, GL_DEPTH);
       return;
@@ -1713,7 +1712,7 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
 
    /* fallback if the driver can't do stencil exports */
    if (type == GL_STENCIL &&
-       !st->screen->get_param(st->screen, PIPE_CAP_SHADER_STENCIL_EXPORT)) {
+       !st->has_stencil_export) {
       copy_stencil_pixels(ctx, srcx, srcy, width, height, dstx, dsty);
       return;
    }

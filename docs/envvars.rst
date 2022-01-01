@@ -68,13 +68,6 @@ Core Mesa environment variables
 :envvar:`MESA_LOG_FILE`
    specifies a file name for logging all errors, warnings, etc., rather
    than stderr
-:envvar:`MESA_TEX_PROG`
-   if set, implement conventional texture environment modes with fragment
-   programs (intended for developers only)
-:envvar:`MESA_TNL_PROG`
-   if set, implement conventional vertex transformation operations with
-   vertex programs (intended for developers only). Setting this variable
-   automatically sets the :envvar:`MESA_TEX_PROG` variable as well.
 :envvar:`MESA_EXTENSION_OVERRIDE`
    can be used to enable/disable extensions. A value such as
    ``GL_EXT_foo -GL_EXT_bar`` will enable the ``GL_EXT_foo`` extension
@@ -400,12 +393,6 @@ Intel driver environment variables
    assembly.
 
 
-Radeon driver environment variables (radeon, r200, and r300g)
--------------------------------------------------------------
-
-:envvar:`RADEON_NO_TCL`
-   if set, disable hardware-accelerated Transform/Clip/Lighting.
-
 DRI environment variables
 -------------------------
 
@@ -699,6 +686,8 @@ RADV driver environment variables
       enable local BOs
    ``nosam``
       disable optimizations that get enabled when all VRAM is CPU visible.
+   ``nv_ms``
+      enable unofficial experimental support for NV_mesh_shader.
    ``pswave32``
       enable wave32 for pixel shaders (GFX10+)
    ``nggc``
@@ -978,6 +967,63 @@ r600 driver environment variables
       Log texture ops
    ``trans``
       Log generic translation messages
+
+r300 driver environment variables
+---------------------------------
+
+:envvar:`RADEON_DEBUG`
+   a comma-separated list of named flags, which do various things:
+
+   ``info``
+      Print hardware info (printed by default on debug builds
+   ``fp``
+      Log fragment program compilation
+   ``vp``
+      Log vertex program compilation
+   ``draw``
+      Log draw calls
+   ``swtcl``
+      Log SWTCL-specific info
+   ``rsblock``
+      Log rasterizer registers
+   ``psc``
+      Log vertex stream registers
+   ``tex``
+      Log basic info about textures
+   ``texalloc``
+      Log texture mipmap tree info
+   ``rs``
+      Log rasterizer
+   ``fb``
+      Log framebuffer
+   ``cbzb``
+      Log fast color clear info
+   ``hyperz``
+      Log HyperZ info
+   ``scissor``
+      Log scissor info
+   ``msaa``
+      Log MSAA resources
+   ``anisohq``
+      Use high quality anisotropic filtering
+   ``notiling``
+      Disable tiling
+   ``noimmd``
+      Disable immediate mode
+   ``noopt``
+      Disable shader optimizations
+   ``nocbzb``
+      Disable fast color clear
+   ``nozmask``
+      Disable zbuffer compression
+   ``nohiz``
+      Disable hierarchical zbuffer
+   ``nocmask``
+      Disable AA compression and fast AA clear
+   ``use_tgsi``
+      Request TGSI shaders from the state tracker
+   ``notcl``
+      Disable hardware accelerated Transform/Clip/Lighting
 
 Other Gallium drivers have their own environment variables. These may
 change frequently so the source code should be consulted for details.

@@ -447,20 +447,11 @@ st_init_driver_flags(struct st_context *st)
 {
    struct gl_driver_flags *f = &st->ctx->DriverFlags;
 
-   f->NewArray = ST_NEW_VERTEX_ARRAYS;
-   f->NewRasterizerDiscard = ST_NEW_RASTERIZER;
-   f->NewTileRasterOrder = ST_NEW_RASTERIZER;
-   f->NewUniformBuffer = ST_NEW_UNIFORM_BUFFER;
-   f->NewTessState = ST_NEW_TESS_STATE;
-
    /* Shader resources */
-   f->NewTextureBuffer = ST_NEW_SAMPLER_VIEWS;
    if (st->has_hw_atomics)
       f->NewAtomicBuffer = ST_NEW_HW_ATOMICS | ST_NEW_CS_ATOMICS;
    else
       f->NewAtomicBuffer = ST_NEW_ATOMIC_BUFFER;
-   f->NewShaderStorageBuffer = ST_NEW_STORAGE_BUFFER;
-   f->NewImageUnits = ST_NEW_IMAGE_UNITS;
 
    f->NewShaderConstants[MESA_SHADER_VERTEX] = ST_NEW_VS_CONSTANTS;
    f->NewShaderConstants[MESA_SHADER_TESS_CTRL] = ST_NEW_TCS_CONSTANTS;
@@ -469,27 +460,13 @@ st_init_driver_flags(struct st_context *st)
    f->NewShaderConstants[MESA_SHADER_FRAGMENT] = ST_NEW_FS_CONSTANTS;
    f->NewShaderConstants[MESA_SHADER_COMPUTE] = ST_NEW_CS_CONSTANTS;
 
-   f->NewWindowRectangles = ST_NEW_WINDOW_RECTANGLES;
-   f->NewFramebufferSRGB = ST_NEW_FB_STATE;
-   f->NewScissorRect = ST_NEW_SCISSOR;
-   f->NewScissorTest = ST_NEW_SCISSOR | ST_NEW_RASTERIZER;
-
    if (st->lower_alpha_test)
       f->NewAlphaTest = ST_NEW_FS_STATE | ST_NEW_FS_CONSTANTS;
    else
       f->NewAlphaTest = ST_NEW_DSA;
 
-   f->NewBlend = ST_NEW_BLEND;
-   f->NewBlendColor = ST_NEW_BLEND_COLOR;
-   f->NewColorMask = ST_NEW_BLEND;
-   f->NewDepth = ST_NEW_DSA;
-   f->NewLogicOp = ST_NEW_BLEND;
-   f->NewStencil = ST_NEW_DSA;
    f->NewMultisampleEnable = ST_NEW_BLEND | ST_NEW_RASTERIZER |
                              ST_NEW_SAMPLE_STATE | ST_NEW_SAMPLE_SHADING;
-   f->NewSampleAlphaToXEnable = ST_NEW_BLEND;
-   f->NewSampleMask = ST_NEW_SAMPLE_STATE;
-   f->NewSampleLocations = ST_NEW_SAMPLE_STATE;
    f->NewSampleShading = ST_NEW_SAMPLE_SHADING;
 
    /* This depends on what the gallium driver wants. */
@@ -500,29 +477,16 @@ st_init_driver_flags(struct st_context *st)
       f->NewSampleShading |= ST_NEW_RASTERIZER;
    }
 
-   f->NewClipControl = ST_NEW_VIEWPORT | ST_NEW_RASTERIZER;
-   f->NewClipPlane = ST_NEW_CLIP_STATE;
-
    if (st->clamp_frag_color_in_shader) {
       f->NewFragClamp = ST_NEW_FS_STATE;
    } else {
       f->NewFragClamp = ST_NEW_RASTERIZER;
    }
 
-   f->NewDepthClamp = ST_NEW_RASTERIZER;
-
    if (st->lower_ucp)
       f->NewClipPlaneEnable = ST_NEW_VS_STATE | ST_NEW_GS_STATE;
    else
       f->NewClipPlaneEnable = ST_NEW_RASTERIZER;
-
-   f->NewLineState = ST_NEW_RASTERIZER;
-   f->NewPolygonState = ST_NEW_RASTERIZER;
-   f->NewPolygonStipple = ST_NEW_POLY_STIPPLE;
-   f->NewViewport = ST_NEW_VIEWPORT;
-   f->NewNvConservativeRasterization = ST_NEW_RASTERIZER;
-   f->NewNvConservativeRasterizationParams = ST_NEW_RASTERIZER;
-   f->NewIntelConservativeRasterization = ST_NEW_RASTERIZER;
 
    if (st->emulate_gl_clamp)
       f->NewSamplersWithClamp = ST_NEW_SAMPLERS |
@@ -609,12 +573,6 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
       st->util_velems.velems[2].vertex_buffer_index = 0;
       st->util_velems.velems[2].src_format = PIPE_FORMAT_R32G32_FLOAT;
    }
-
-   /* Need these flags:
-    */
-   ctx->FragmentProgram._MaintainTexEnvProgram = GL_TRUE;
-   ctx->VertexProgram._MaintainTnlProgram = GL_TRUE;
-   _mesa_reset_vertex_processing_mode(ctx);
 
    if (no_error)
       ctx->Const.ContextFlags |= GL_CONTEXT_FLAG_NO_ERROR_BIT_KHR;

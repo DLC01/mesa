@@ -26,13 +26,13 @@
 VKAPI_ATTR VkResult VKAPI_CALL
 metro_exodus_GetSemaphoreCounterValue(VkDevice _device, VkSemaphore _semaphore, uint64_t *pValue)
 {
-   RADV_FROM_HANDLE(radv_semaphore, semaphore, _semaphore);
+   VK_FROM_HANDLE(vk_device, device, _device);
 
    /* See https://gitlab.freedesktop.org/mesa/mesa/-/issues/5119. */
-   if (semaphore == NULL) {
+   if (_semaphore == VK_NULL_HANDLE) {
       fprintf(stderr, "RADV: Ignoring vkGetSemaphoreCounterValue() with NULL semaphore (game bug)!\n");
       return VK_SUCCESS;
    }
 
-   return radv_GetSemaphoreCounterValue(_device, _semaphore, pValue);
+   return device->dispatch_table.GetSemaphoreCounterValue(_device, _semaphore, pValue);
 }

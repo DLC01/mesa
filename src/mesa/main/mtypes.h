@@ -998,6 +998,11 @@ struct gl_texture_object
    /** GL_ARB_bindless_texture */
    struct util_dynarray SamplerHandles;
    struct util_dynarray ImageHandles;
+
+   /** GL_ARB_sparse_texture */
+   GLboolean IsSparse;
+   GLint VirtualPageSizeIndex;
+   GLint NumSparseLevels;
 };
 
 
@@ -1708,7 +1713,7 @@ struct gl_array_attrib
     * If gallium vertex buffers are dirty, this flag indicates whether gallium
     * vertex elements are dirty too. If this is false, GL states corresponding
     * to vertex elements have not been changed. Thus, this affects what will
-    * happen when gl_driver_flags::NewArray is set.
+    * happen when ST_NEW_VERTEX_ARRAYS is set.
     *
     * The driver should clear this when it's done.
     */
@@ -2335,8 +2340,6 @@ struct gl_vertex_program_state
    GLboolean Enabled;            /**< User-set GL_VERTEX_PROGRAM_ARB/NV flag */
    GLboolean PointSizeEnabled;   /**< GL_VERTEX_PROGRAM_POINT_SIZE_ARB/NV */
    GLboolean TwoSideEnabled;     /**< GL_VERTEX_PROGRAM_TWO_SIDE_ARB/NV */
-   /** Should fixed-function T&L be implemented with a vertex prog? */
-   GLboolean _MaintainTnlProgram;
    /** Whether the fixed-func program is being used right now. */
    GLboolean _UsesTnlProgram;
 
@@ -2415,8 +2418,6 @@ struct gl_geometry_program_state
 struct gl_fragment_program_state
 {
    GLboolean Enabled;     /**< User-set fragment program enable flag */
-   /** Should fixed-function texturing be implemented with a fragment prog? */
-   GLboolean _MaintainTexEnvProgram;
    /** Whether the fixed-func program is being used right now. */
    GLboolean _UsesTexEnvProgram;
 
@@ -4084,20 +4085,6 @@ struct gl_constants
    GLuint MaxDualSourceDrawBuffers;
 
    /**
-    * Whether the implementation strips out and ignores texture borders.
-    *
-    * Many GPU hardware implementations don't support rendering with texture
-    * borders and mipmapped textures.  (Note: not static border color, but the
-    * old 1-pixel border around each edge).  Implementations then have to do
-    * slow fallbacks to be correct, or just ignore the border and be fast but
-    * wrong.  Setting the flag strips the border off of TexImage calls,
-    * providing "fast but wrong" at significantly reduced driver complexity.
-    *
-    * Texture borders are deprecated in GL 3.0.
-    **/
-   GLboolean StripTextureBorder;
-
-   /**
     * For drivers which can do a better job at eliminating unused uniforms
     * than the GLSL compiler.
     *
@@ -4309,9 +4296,6 @@ struct gl_constants
    /** Whether the vertex buffer offset is a signed 32-bit integer. */
    bool VertexBufferOffsetIsInt32;
 
-   /** Whether the driver can handle MultiDrawElements with non-VBO indices. */
-   bool MultiDrawWithUserIndices;
-
    /** Whether out-of-order draw (Begin/End) optimizations are allowed. */
    bool AllowDrawOutOfOrder;
 
@@ -4349,6 +4333,12 @@ struct gl_constants
     * a frame, but always getting framebuffer completeness.
     */
    bool GLThreadNopCheckFramebufferStatus;
+
+   /** GL_ARB_sparse_texture */
+   GLuint MaxSparseTextureSize;
+   GLuint MaxSparse3DTextureSize;
+   GLuint MaxSparseArrayTextureLayers;
+   bool SparseTextureFullArrayCubeMipmaps;
 };
 
 
@@ -4440,6 +4430,7 @@ struct gl_extensions
    GLboolean ARB_shading_language_420pack;
    GLboolean ARB_shadow;
    GLboolean ARB_sparse_buffer;
+   GLboolean ARB_sparse_texture;
    GLboolean ARB_stencil_texturing;
    GLboolean ARB_spirv_extensions;
    GLboolean ARB_sync;
@@ -4789,119 +4780,19 @@ struct gl_dlist_state
  */
 struct gl_driver_flags
 {
-   /** gl_context::Array::_DrawArrays (vertex array state) */
-   uint64_t NewArray;
-
-   /** gl_context::TransformFeedback::CurrentObject */
-   uint64_t NewTransformFeedback;
-
-   /** gl_context::TransformFeedback::CurrentObject::shader_program */
-   uint64_t NewTransformFeedbackProg;
-
-   /** gl_context::RasterDiscard */
-   uint64_t NewRasterizerDiscard;
-
-   /** gl_context::TileRasterOrder* */
-   uint64_t NewTileRasterOrder;
-
-   /**
-    * gl_context::UniformBufferBindings
-    * gl_shader_program::UniformBlocks
-    */
-   uint64_t NewUniformBuffer;
-
-   /**
-    * gl_context::ShaderStorageBufferBindings
-    * gl_shader_program::ShaderStorageBlocks
-    */
-   uint64_t NewShaderStorageBuffer;
-
-   uint64_t NewTextureBuffer;
-
    /**
     * gl_context::AtomicBufferBindings
     */
    uint64_t NewAtomicBuffer;
 
-   /**
-    * gl_context::ImageUnits
-    */
-   uint64_t NewImageUnits;
-
-   /**
-    * gl_context::TessCtrlProgram::patch_default_*
-    * gl_context::TessCtrlProgram::patch_vertices
-    */
-   uint64_t NewTessState;
-
-   /**
-    * gl_context::IntelConservativeRasterization
-    */
-   uint64_t NewIntelConservativeRasterization;
-
-   /**
-    * gl_context::NvConservativeRasterization
-    */
-   uint64_t NewNvConservativeRasterization;
-
-   /**
-    * gl_context::ConservativeRasterMode/ConservativeRasterDilate
-    * gl_context::SubpixelPrecisionBias
-    */
-   uint64_t NewNvConservativeRasterizationParams;
-
-   /**
-    * gl_context::Scissor::WindowRects
-    */
-   uint64_t NewWindowRectangles;
-
-   /** gl_context::Color::sRGBEnabled */
-   uint64_t NewFramebufferSRGB;
-
-   /** gl_context::Scissor::EnableFlags */
-   uint64_t NewScissorTest;
-
-   /** gl_context::Scissor::ScissorArray */
-   uint64_t NewScissorRect;
-
    /** gl_context::Color::Alpha* */
    uint64_t NewAlphaTest;
-
-   /** gl_context::Color::Blend/Dither */
-   uint64_t NewBlend;
-
-   /** gl_context::Color::BlendColor */
-   uint64_t NewBlendColor;
-
-   /** gl_context::Color::Color/Index */
-   uint64_t NewColorMask;
-
-   /** gl_context::Depth */
-   uint64_t NewDepth;
-
-   /** gl_context::Color::LogicOp/ColorLogicOp/IndexLogicOp */
-   uint64_t NewLogicOp;
 
    /** gl_context::Multisample::Enabled */
    uint64_t NewMultisampleEnable;
 
-   /** gl_context::Multisample::SampleAlphaTo* */
-   uint64_t NewSampleAlphaToXEnable;
-
-   /** gl_context::Multisample::SampleCoverage/SampleMaskValue */
-   uint64_t NewSampleMask;
-
    /** gl_context::Multisample::(Min)SampleShading */
    uint64_t NewSampleShading;
-
-   /** gl_context::Stencil */
-   uint64_t NewStencil;
-
-   /** gl_context::Transform::ClipOrigin/ClipDepthMode */
-   uint64_t NewClipControl;
-
-   /** gl_context::Transform::EyeUserPlane */
-   uint64_t NewClipPlane;
 
    /** gl_context::Transform::ClipPlanesEnabled */
    uint64_t NewClipPlaneEnable;
@@ -4909,26 +4800,8 @@ struct gl_driver_flags
    /** gl_context::Color::ClampFragmentColor */
    uint64_t NewFragClamp;
 
-   /** gl_context::Transform::DepthClamp */
-   uint64_t NewDepthClamp;
-
-   /** gl_context::Line */
-   uint64_t NewLineState;
-
-   /** gl_context::Polygon */
-   uint64_t NewPolygonState;
-
-   /** gl_context::PolygonStipple */
-   uint64_t NewPolygonStipple;
-
-   /** gl_context::ViewportArray */
-   uint64_t NewViewport;
-
    /** Shader constants (uniforms, program parameters, state constants) */
    uint64_t NewShaderConstants[MESA_SHADER_STAGES];
-
-   /** Programmable sample location state for gl_context::DrawBuffer */
-   uint64_t NewSampleLocations;
 
    /** For GL_CLAMP emulation */
    uint64_t NewSamplersWithClamp;

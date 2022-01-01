@@ -47,8 +47,9 @@ enum {
    RADV_PREFETCH_TES = (1 << 3),
    RADV_PREFETCH_GS = (1 << 4),
    RADV_PREFETCH_PS = (1 << 5),
+   RADV_PREFETCH_MS = (1 << 6),
    RADV_PREFETCH_SHADERS = (RADV_PREFETCH_VS | RADV_PREFETCH_TCS | RADV_PREFETCH_TES |
-                            RADV_PREFETCH_GS | RADV_PREFETCH_PS)
+                            RADV_PREFETCH_GS | RADV_PREFETCH_PS | RADV_PREFETCH_MS)
 };
 
 enum {
@@ -1096,19 +1097,20 @@ radv_emit_shader_prefetch(struct radv_cmd_buffer *cmd_buffer, struct radv_shader
 
 static void
 radv_emit_prefetch_L2(struct radv_cmd_buffer *cmd_buffer, struct radv_pipeline *pipeline,
-                      bool vertex_stage_only)
+                      bool first_stage_only)
 {
    struct radv_cmd_state *state = &cmd_buffer->state;
    uint32_t mask = state->prefetch_L2_mask;
 
-   if (vertex_stage_only) {
-      /* Fast prefetch path for starting draws as soon as possible.
-       */
-      mask = state->prefetch_L2_mask & (RADV_PREFETCH_VS | RADV_PREFETCH_VBO_DESCRIPTORS);
-   }
+   /* Fast prefetch path for starting draws as soon as possible. */
+   if (first_stage_only)
+      mask &= RADV_PREFETCH_VS | RADV_PREFETCH_VBO_DESCRIPTORS | RADV_PREFETCH_MS;
 
    if (mask & RADV_PREFETCH_VS)
       radv_emit_shader_prefetch(cmd_buffer, pipeline->shaders[MESA_SHADER_VERTEX]);
+
+   if (mask & RADV_PREFETCH_MS)
+      radv_emit_shader_prefetch(cmd_buffer, pipeline->shaders[MESA_SHADER_MESH]);
 
    if (mask & RADV_PREFETCH_VBO_DESCRIPTORS)
       si_cp_dma_prefetch(cmd_buffer, state->vb_va, pipeline->vb_desc_alloc_size);
@@ -1569,6 +1571,8 @@ static void
 radv_emit_primitive_topology(struct radv_cmd_buffer *cmd_buffer)
 {
    struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
+
+   assert(!cmd_buffer->state.mesh_shading || d->primitive_topology == V_008958_DI_PT_POINTLIST);
 
    if (cmd_buffer->device->physical_device->rad_info.chip_class >= GFX7) {
       radeon_set_uconfig_reg_idx(cmd_buffer->device->physical_device, cmd_buffer->cs,
@@ -2473,6 +2477,7 @@ radv_emit_framebuffer_state(struct radv_cmd_buffer *cmd_buffer)
    int i;
    struct radv_framebuffer *framebuffer = cmd_buffer->state.framebuffer;
    const struct radv_subpass *subpass = cmd_buffer->state.subpass;
+   bool disable_constant_encode_ac01 = false;
 
    for (i = 0; i < 8; ++i) {
       if (i >= subpass->color_count ||
@@ -2495,6 +2500,14 @@ radv_emit_framebuffer_state(struct radv_cmd_buffer *cmd_buffer)
                                in_render_loop, cmd_buffer->state.attachments[idx].disable_dcc);
 
       radv_load_color_clear_metadata(cmd_buffer, iview, i);
+
+      if (cmd_buffer->device->physical_device->rad_info.chip_class >= GFX9 &&
+          iview->image->dcc_sign_reinterpret) {
+         /* Disable constant encoding with the clear value of "1" with different DCC signedness
+          * because the hardware will fill "1" instead of the clear value.
+          */
+         disable_constant_encode_ac01 = true;
+      }
    }
 
    if (subpass->depth_stencil_attachment) {
@@ -2572,6 +2585,7 @@ radv_emit_framebuffer_state(struct radv_cmd_buffer *cmd_buffer)
       radeon_set_context_reg(cmd_buffer->cs, R_028424_CB_DCC_CONTROL,
                              S_028424_OVERWRITE_COMBINER_MRT_SHARING_DISABLE(chip_class <= GFX9) |
                                 S_028424_OVERWRITE_COMBINER_WATERMARK(watermark) |
+                                S_028424_DISABLE_CONSTANT_ENCODE_AC01(disable_constant_encode_ac01) |
                                 S_028424_DISABLE_CONSTANT_ENCODE_REG(disable_constant_encode));
    }
 
@@ -2976,6 +2990,8 @@ radv_emit_vertex_input(struct radv_cmd_buffer *cmd_buffer, bool pipeline_is_dirt
    struct radv_pipeline *pipeline = cmd_buffer->state.pipeline;
    struct radv_shader *vs_shader = radv_get_shader(pipeline, MESA_SHADER_VERTEX);
 
+   assert(!cmd_buffer->state.mesh_shading);
+
    if (!vs_shader->info.vs.has_prolog)
       return;
 
@@ -3116,6 +3132,10 @@ radv_flush_indirect_descriptor_sets(struct radv_cmd_buffer *cmd_buffer,
 
       if (pipeline->shaders[MESA_SHADER_FRAGMENT])
          radv_emit_userdata_address(cmd_buffer, pipeline, MESA_SHADER_FRAGMENT,
+                                    AC_UD_INDIRECT_DESCRIPTOR_SETS, va);
+
+      if (radv_pipeline_has_mesh(pipeline))
+         radv_emit_userdata_address(cmd_buffer, pipeline, MESA_SHADER_MESH,
                                     AC_UD_INDIRECT_DESCRIPTOR_SETS, va);
 
       if (radv_pipeline_has_gs(pipeline))
@@ -3309,6 +3329,9 @@ radv_flush_vertex_descriptors(struct radv_cmd_buffer *cmd_buffer, bool pipeline_
 {
    if ((pipeline_is_dirty || (cmd_buffer->state.dirty & RADV_CMD_DIRTY_VERTEX_BUFFER)) &&
        cmd_buffer->state.pipeline->vb_desc_usage_mask) {
+      /* Mesh shaders don't have vertex descriptors. */
+      assert(!cmd_buffer->state.mesh_shading);
+
       struct radv_pipeline *pipeline = cmd_buffer->state.pipeline;
       struct radv_shader *vs_shader = radv_get_shader(pipeline, MESA_SHADER_VERTEX);
       enum chip_class chip = cmd_buffer->device->physical_device->rad_info.chip_class;
@@ -3594,9 +3617,11 @@ radv_upload_graphics_shader_descriptors(struct radv_cmd_buffer *cmd_buffer, bool
 {
    radv_flush_vertex_descriptors(cmd_buffer, pipeline_is_dirty);
    radv_flush_streamout_descriptors(cmd_buffer);
-   radv_flush_descriptors(cmd_buffer, VK_SHADER_STAGE_ALL_GRAPHICS, cmd_buffer->state.pipeline,
+
+   VkShaderStageFlags stages = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_MESH_BIT_NV;
+   radv_flush_descriptors(cmd_buffer, stages, cmd_buffer->state.pipeline,
                           VK_PIPELINE_BIND_POINT_GRAPHICS);
-   radv_flush_constants(cmd_buffer, VK_SHADER_STAGE_ALL_GRAPHICS, cmd_buffer->state.pipeline,
+   radv_flush_constants(cmd_buffer, stages, cmd_buffer->state.pipeline,
                         VK_PIPELINE_BIND_POINT_GRAPHICS);
    radv_flush_ngg_gs_state(cmd_buffer);
 }
@@ -3759,6 +3784,7 @@ radv_stage_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2KHR sr
                VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT_KHR |
                VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT_KHR |
                VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT_KHR |
+               VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_NV |
                VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT |
                VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT_KHR)) {
       cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_VS_PARTIAL_FLUSH;
@@ -4494,6 +4520,7 @@ radv_BeginCommandBuffer(VkCommandBuffer commandBuffer, const VkCommandBufferBegi
    cmd_buffer->state.last_sx_blend_opt_control = -1;
    cmd_buffer->state.last_nggc_settings = -1;
    cmd_buffer->state.last_nggc_settings_sgpr_idx = -1;
+   cmd_buffer->state.mesh_shading = false;
    cmd_buffer->usage_flags = pBeginInfo->flags;
 
    if (cmd_buffer->level == VK_COMMAND_BUFFER_LEVEL_SECONDARY &&
@@ -4689,7 +4716,6 @@ radv_bind_descriptor_set(struct radv_cmd_buffer *cmd_buffer, VkPipelineBindPoint
    radv_set_descriptor_set(cmd_buffer, bind_point, set, idx);
 
    assert(set);
-   assert(!(set->header.layout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR));
 
    if (!cmd_buffer->device->use_global_bo_list) {
       for (unsigned j = 0; j < set->header.buffer_count; ++j)
@@ -4727,7 +4753,7 @@ radv_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint pi
          radv_bind_descriptor_set(cmd_buffer, pipelineBindPoint, set, set_idx);
       }
 
-      for (unsigned j = 0; j < set->header.layout->dynamic_offset_count; ++j, ++dyn_idx) {
+      for (unsigned j = 0; j < layout->set[set_idx].dynamic_offset_count; ++j, ++dyn_idx) {
          unsigned idx = j + layout->set[i + firstSet].dynamic_offset_start;
          uint32_t *dst = descriptors_state->dynamic_buffers + idx * 4;
          assert(dyn_idx < dynamicOffsetCount);
@@ -4753,7 +4779,7 @@ radv_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint pi
             }
          }
 
-         cmd_buffer->push_constant_stages |= set->header.layout->dynamic_shader_stages;
+         cmd_buffer->push_constant_stages |= layout->set[set_idx].dynamic_offset_stages;
       }
    }
 }
@@ -5019,6 +5045,7 @@ radv_CmdBindPipeline(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipeline
       if (!pipeline)
          break;
 
+      cmd_buffer->state.mesh_shading = radv_pipeline_has_mesh(pipeline);
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_PIPELINE | RADV_CMD_DIRTY_DYNAMIC_VERTEX_INPUT;
       cmd_buffer->push_constant_stages |= pipeline->active_stages;
 
@@ -6203,7 +6230,7 @@ radv_emit_draw_packets_indexed(struct radv_cmd_buffer *cmd_buffer,
                                uint32_t drawCount, const VkMultiDrawIndexedInfoEXT *minfo,
                                uint32_t stride,
                                const int32_t *vertexOffset)
- 
+
 {
    struct radv_cmd_state *state = &cmd_buffer->state;
    struct radeon_cmdbuf *cs = cmd_buffer->cs;
@@ -6803,6 +6830,88 @@ radv_after_draw(struct radv_cmd_buffer *cmd_buffer)
    radv_cmd_buffer_after_draw(cmd_buffer, RADV_CMD_FLAG_PS_PARTIAL_FLUSH);
 }
 
+static struct radv_buffer
+radv_nv_mesh_indirect_bo(struct radv_cmd_buffer *cmd_buffer,
+                         struct radv_buffer *buffer, VkDeviceSize offset,
+                         uint32_t draw_count, uint32_t stride)
+{
+   /* Translates the indirect BO format used by NV_mesh_shader API
+    * to the BO format used by DRAW_INDIRECT / DRAW_INDIRECT_MULTI.
+    */
+
+   struct radeon_cmdbuf *cs = cmd_buffer->cs;
+   struct radeon_winsys *ws = cmd_buffer->device->ws;
+
+   const size_t src_stride = MAX2(stride, sizeof(VkDrawMeshTasksIndirectCommandNV));
+   const size_t dst_stride = sizeof(VkDrawIndirectCommand);
+   const size_t src_off_task_count = offsetof(VkDrawMeshTasksIndirectCommandNV, taskCount);
+   const size_t src_off_first_task = offsetof(VkDrawMeshTasksIndirectCommandNV, firstTask);
+   const size_t dst_off_vertex_count = offsetof(VkDrawIndirectCommand, vertexCount);
+   const size_t dst_off_first_vertex = offsetof(VkDrawIndirectCommand, firstVertex);
+
+   /* Fill the buffer with all zeroes except instanceCount = 1.
+    * This helps emit fewer copy packets below.
+    */
+   VkDrawIndirectCommand *fill_data = (VkDrawIndirectCommand *) alloca(dst_stride * draw_count);
+   const VkDrawIndirectCommand filler = { .instanceCount = 1 };
+   for (unsigned i = 0; i < draw_count; ++i)
+      fill_data[i] = filler;
+
+   /* We'll have to copy data from the API BO. */
+   uint64_t va = radv_buffer_get_va(buffer->bo) + buffer->offset + offset;
+   radv_cs_add_buffer(ws, cs, buffer->bo);
+
+   /* Allocate some space in the upload BO. */
+   unsigned out_offset;
+   radv_cmd_buffer_upload_data(cmd_buffer, dst_stride * draw_count, fill_data, &out_offset);
+   const uint64_t new_va = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + out_offset;
+
+   ASSERTED unsigned cdw_max = radeon_check_space(ws, cs, 12 * draw_count + 2);
+
+   /* Copy data from the API BO so that the format is suitable for the
+    * indirect draw packet:
+    * - vertexCount = taskCount (copied here)
+    * - instanceCount = 1 (filled by CPU above)
+    * - firstVertex = firstTask (copied here)
+    * - firstInstance = 0 (filled by CPU above)
+    */
+   for (unsigned i = 0; i < draw_count; ++i) {
+      const uint64_t src_task_count = va + i * src_stride + src_off_task_count;
+      const uint64_t src_first_task = va + i * src_stride + src_off_first_task;
+      const uint64_t dst_vertex_count = new_va + i * dst_stride + dst_off_vertex_count;
+      const uint64_t dst_first_vertex = new_va + i * dst_stride + dst_off_first_vertex;
+
+      radeon_emit(cs, PKT3(PKT3_COPY_DATA, 4, cmd_buffer->state.predicating));
+      radeon_emit(cs, COPY_DATA_SRC_SEL(COPY_DATA_SRC_MEM) | COPY_DATA_DST_SEL(COPY_DATA_DST_MEM) |
+                      COPY_DATA_WR_CONFIRM);
+      radeon_emit(cs, src_task_count);
+      radeon_emit(cs, src_task_count >> 32);
+      radeon_emit(cs, dst_vertex_count);
+      radeon_emit(cs, dst_vertex_count >> 32);
+
+      radeon_emit(cs, PKT3(PKT3_COPY_DATA, 4, cmd_buffer->state.predicating));
+      radeon_emit(cs, COPY_DATA_SRC_SEL(COPY_DATA_SRC_MEM) | COPY_DATA_DST_SEL(COPY_DATA_DST_MEM) |
+                      COPY_DATA_WR_CONFIRM);
+      radeon_emit(cs, src_first_task);
+      radeon_emit(cs, src_first_task >> 32);
+      radeon_emit(cs, dst_first_vertex);
+      radeon_emit(cs, dst_first_vertex >> 32);
+   }
+
+   /* Wait for the copies to finish */
+   radeon_emit(cs, PKT3(PKT3_PFP_SYNC_ME, 0, 0));
+   radeon_emit(cs, 0);
+
+   /* The draw packet can now use this buffer: */
+   struct radv_buffer buf = *buffer;
+   buf.bo = cmd_buffer->upload.upload_bo;
+   buf.offset = out_offset;
+
+   assert(cmd_buffer->cs->cdw <= cdw_max);
+
+   return buf;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 radv_CmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount,
              uint32_t firstVertex, uint32_t firstInstance)
@@ -6986,6 +7095,115 @@ radv_CmdDrawIndexedIndirectCount(VkCommandBuffer commandBuffer, VkBuffer _buffer
    info.instance_count = 0;
 
    if (!radv_before_draw(cmd_buffer, &info, 1))
+      return;
+   radv_emit_indirect_draw_packets(cmd_buffer, &info);
+   radv_after_draw(cmd_buffer);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+radv_CmdDrawMeshTasksNV(VkCommandBuffer commandBuffer, uint32_t taskCount, uint32_t firstTask)
+{
+   RADV_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
+
+   ASSERTED struct radv_pipeline *pipeline = cmd_buffer->state.pipeline;
+   assert(!pipeline->shaders[MESA_SHADER_TASK]);
+
+   /* Direct draw with mesh shader only.
+    *
+    * Use a non-indexed direct draw packet: DRAW_INDEX_AUTO.
+    * As far as the HW is concerned: 1 input vertex = 1 mesh shader workgroup.
+    */
+
+   struct radv_draw_info info;
+
+   info.count = taskCount;
+   info.instance_count = 1;
+   info.first_instance = 0;
+   info.stride = 0;
+   info.indexed = false;
+   info.strmout_buffer = NULL;
+   info.count_buffer = NULL;
+   info.indirect = NULL;
+
+   if (!radv_before_draw(cmd_buffer, &info, 1))
+      return;
+
+   const VkMultiDrawInfoEXT minfo = { firstTask, taskCount };
+   radv_emit_direct_draw_packets(cmd_buffer, &info, 1, &minfo, 0, 0);
+   radv_after_draw(cmd_buffer);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+radv_CmdDrawMeshTasksIndirectNV(VkCommandBuffer commandBuffer, VkBuffer _buffer,
+                                VkDeviceSize offset, uint32_t drawCount, uint32_t stride)
+{
+   RADV_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
+   RADV_FROM_HANDLE(radv_buffer, buffer, _buffer);
+
+   ASSERTED struct radv_pipeline *pipeline = cmd_buffer->state.pipeline;
+   assert(!pipeline->shaders[MESA_SHADER_TASK]);
+
+   if (!drawCount)
+      return;
+
+   /* Indirect draw with mesh shader only.
+    *
+    * Use DRAW_INDIRECT / DRAW_INDIRECT_MULTI like normal indirect draws.
+    * We must use these draw commands for NV_mesh_shader because these
+    * have firstVertex while the new DISPATCH_MESH_INDIRECT_MULTI
+    * command doesn't have that.
+    *
+    * The indirect BO layout from the NV_mesh_shader API is not directly
+    * compatible with AMD HW. To make it work, we allocate some space
+    * in the upload buffer and copy the data to it.
+    */
+   struct radv_buffer buf = radv_nv_mesh_indirect_bo(cmd_buffer, buffer, offset,
+                                                      drawCount, stride);
+   struct radv_draw_info info;
+
+   info.count = drawCount;
+   info.indirect = &buf;
+   info.indirect_offset = 0;
+   info.stride = sizeof(VkDrawIndirectCommand);
+   info.strmout_buffer = NULL;
+   info.count_buffer = NULL;
+   info.indexed = false;
+   info.instance_count = 0;
+
+   if (!radv_before_draw(cmd_buffer, &info, drawCount))
+      return;
+   radv_emit_indirect_draw_packets(cmd_buffer, &info);
+   radv_after_draw(cmd_buffer);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+radv_CmdDrawMeshTasksIndirectCountNV(VkCommandBuffer commandBuffer, VkBuffer _buffer,
+                                     VkDeviceSize offset, VkBuffer _countBuffer,
+                                     VkDeviceSize countBufferOffset, uint32_t maxDrawCount,
+                                     uint32_t stride)
+{
+   RADV_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
+   RADV_FROM_HANDLE(radv_buffer, buffer, _buffer);
+   RADV_FROM_HANDLE(radv_buffer, count_buffer, _countBuffer);
+
+   ASSERTED struct radv_pipeline *pipeline = cmd_buffer->state.pipeline;
+   assert(!pipeline->shaders[MESA_SHADER_TASK]);
+
+   struct radv_buffer buf = radv_nv_mesh_indirect_bo(cmd_buffer, buffer, offset,
+                                                      maxDrawCount, stride);
+   struct radv_draw_info info;
+
+   info.count = maxDrawCount;
+   info.indirect = &buf;
+   info.indirect_offset = 0;
+   info.stride = sizeof(VkDrawIndirectCommand);
+   info.strmout_buffer = NULL;
+   info.count_buffer = count_buffer;
+   info.count_buffer_offset = countBufferOffset;
+   info.indexed = false;
+   info.instance_count = 0;
+
+   if (!radv_before_draw(cmd_buffer, &info, maxDrawCount))
       return;
    radv_emit_indirect_draw_packets(cmd_buffer, &info);
    radv_after_draw(cmd_buffer);
@@ -8273,6 +8491,7 @@ write_event(struct radv_cmd_buffer *cmd_buffer, struct radv_event *event,
       post_index_fetch_flags | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT_KHR |
       VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT_KHR |
       VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT_KHR |
+      VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_NV |
       VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT |
       VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT_KHR |
       VK_PIPELINE_STAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR |

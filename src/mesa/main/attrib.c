@@ -62,6 +62,7 @@
 
 #include "state_tracker/st_cb_texture.h"
 #include "state_tracker/st_cb_viewport.h"
+#include "state_tracker/st_context.h"
 
 static inline bool
 copy_texture_attribs(struct gl_texture_object *dst,
@@ -978,10 +979,7 @@ _mesa_PopAttrib(void)
    if (mask & GL_POLYGON_STIPPLE_BIT) {
       memcpy(ctx->PolygonStipple, attr->PolygonStipple, 32*sizeof(GLuint));
 
-      if (ctx->DriverFlags.NewPolygonStipple)
-         ctx->NewDriverState |= ctx->DriverFlags.NewPolygonStipple;
-      else
-         ctx->NewState |= _NEW_POLYGONSTIPPLE;
+      ctx->NewDriverState |= ST_NEW_POLY_STIPPLE;
    }
 
    if (mask & GL_SCISSOR_BIT) {
@@ -1042,7 +1040,7 @@ _mesa_PopAttrib(void)
          _math_matrix_analyse(ctx->ProjectionMatrixStack.Top);
 
       ctx->NewState |= _NEW_TRANSFORM;
-      ctx->NewDriverState |= ctx->DriverFlags.NewClipPlane;
+      ctx->NewDriverState |= ST_NEW_CLIP_STATE;
 
       /* restore clip planes */
       for (i = 0; i < ctx->Const.MaxClipPlanes; i++) {
@@ -1093,7 +1091,7 @@ _mesa_PopAttrib(void)
 
          if (memcmp(&ctx->ViewportArray[i].X, &vp->X, sizeof(float) * 6)) {
             ctx->NewState |= _NEW_VIEWPORT;
-            ctx->NewDriverState |= ctx->DriverFlags.NewViewport;
+            ctx->NewDriverState |= ST_NEW_VIEWPORT;
 
             memcpy(&ctx->ViewportArray[i].X, &vp->X, sizeof(float) * 6);
 

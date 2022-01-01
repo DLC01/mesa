@@ -35,6 +35,7 @@ struct pipe_screen;
 enum d3d12_resource_binding_type {
    D3D12_RESOURCE_BINDING_TYPE_SRV,
    D3D12_RESOURCE_BINDING_TYPE_CBV,
+   D3D12_RESOURCE_BINDING_TYPE_UAV,
    D3D12_RESOURCE_BINDING_TYPES
 };
 
@@ -106,6 +107,7 @@ static inline bool
 d3d12_subresource_id_uses_layer(enum pipe_texture_target target)
 {
    return target == PIPE_TEXTURE_CUBE ||
+          target == PIPE_TEXTURE_CUBE_ARRAY ||
           target == PIPE_TEXTURE_1D_ARRAY ||
           target == PIPE_TEXTURE_2D_ARRAY;
 }

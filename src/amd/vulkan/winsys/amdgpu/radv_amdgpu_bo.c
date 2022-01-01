@@ -498,7 +498,6 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
    bo->bo = buf_handle;
    bo->base.initial_domain = initial_domain;
    bo->base.use_global_list = bo->base.is_local;
-   bo->is_shared = false;
    bo->priority = priority;
 
    r = amdgpu_bo_export(buf_handle, amdgpu_bo_handle_type_kms, &bo->bo_handle);
@@ -666,8 +665,8 @@ radv_amdgpu_winsys_bo_from_fd(struct radeon_winsys *_ws, int fd, unsigned priori
    uint64_t va;
    amdgpu_va_handle va_handle;
    enum amdgpu_bo_handle_type type = amdgpu_bo_handle_type_dma_buf_fd;
-   struct amdgpu_bo_import_result result = {0};
-   struct amdgpu_bo_info info = {0};
+   struct amdgpu_bo_import_result result;
+   struct amdgpu_bo_info info;
    enum radeon_bo_domain initial = 0;
    int r;
    VkResult vk_result = VK_SUCCESS;
@@ -721,7 +720,6 @@ radv_amdgpu_winsys_bo_from_fd(struct radeon_winsys *_ws, int fd, unsigned priori
    bo->base.initial_domain = initial;
    bo->base.use_global_list = false;
    bo->size = result.alloc_size;
-   bo->is_shared = true;
    bo->priority = priority;
 
    r = amdgpu_bo_export(result.buf_handle, amdgpu_bo_handle_type_kms, &bo->bo_handle);
@@ -761,7 +759,6 @@ radv_amdgpu_winsys_get_fd(struct radeon_winsys *_ws, struct radeon_winsys_bo *_b
       return false;
 
    *fd = (int)handle;
-   bo->is_shared = true;
    return true;
 }
 

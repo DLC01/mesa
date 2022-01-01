@@ -985,7 +985,8 @@ guess_and_alloc_texture(struct st_context *st,
                                  ptHeight,
                                  ptDepth,
                                  ptLayers, 0,
-                                 bindings);
+                                 bindings,
+                                 false);
 
    stObj->lastLevel = lastLevel;
 
@@ -1080,7 +1081,8 @@ st_AllocTextureImageBuffer(struct gl_context *ctx,
                                       ptHeight,
                                       ptDepth,
                                       ptLayers, 0,
-                                      bindings);
+                                      bindings,
+                                      false);
       return stImage->pt != NULL;
    }
 }
@@ -3126,7 +3128,8 @@ st_finalize_texture(struct gl_context *ctx,
                                     ptHeight,
                                     ptDepth,
                                     ptLayers, ptNumSamples,
-                                    bindings);
+                                    bindings,
+                                    false);
 
       if (!stObj->pt) {
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "glTexImage");
@@ -3337,7 +3340,8 @@ st_texture_storage(struct gl_context *ctx,
                                     ptHeight,
                                     ptDepth,
                                     ptLayers, num_samples,
-                                    bindings);
+                                    bindings,
+                                    texObj->IsSparse);
    }
 
    if (!stObj->pt)
@@ -3354,6 +3358,9 @@ st_texture_storage(struct gl_context *ctx,
          compressed_tex_fallback_allocate(st, stImage);
       }
    }
+
+   /* Update gl_texture_object for texture parameter query. */
+   texObj->NumSparseLevels = stObj->pt->nr_sparse_levels;
 
    /* The texture is in a validated state, so no need to check later. */
    stObj->needs_validation = false;
@@ -3708,4 +3715,38 @@ st_MakeImageHandleResident(struct gl_context *ctx, GLuint64 handle,
    struct pipe_context *pipe = st->pipe;
 
    pipe->make_image_handle_resident(pipe, handle, access, resident);
+}
+
+GLboolean
+st_GetSparseTextureVirtualPageSize(struct gl_context *ctx,
+                                   GLenum target, mesa_format format,
+                                   unsigned index, int *x, int *y, int *z)
+{
+   struct st_context *st = st_context(ctx);
+   struct pipe_screen *screen = st->screen;
+   enum pipe_texture_target ptarget = gl_target_to_pipe(target);
+   enum pipe_format pformat = st_mesa_format_to_pipe_format(st, format);
+
+   /* Get an XYZ page size combination specified by index. */
+   return !!screen->get_sparse_texture_virtual_page_size(
+      screen, ptarget, pformat, index, 1, x, y, z);
+}
+
+void
+st_TexturePageCommitment(struct gl_context *ctx,
+                         struct gl_texture_object *tex_obj,
+                         int level, int xoffset, int yoffset, int zoffset,
+                         int width, int height, int depth, bool commit)
+{
+   struct st_context *st = st_context(ctx);
+   struct pipe_context *pipe = st->pipe;
+   struct st_texture_object *tex = st_texture_object(tex_obj);
+   struct pipe_box box;
+
+   u_box_3d(xoffset, yoffset, zoffset, width, height, depth, &box);
+
+   if (!pipe->resource_commit(pipe, tex->pt, level, &box, commit)) {
+      _mesa_error(ctx, GL_OUT_OF_MEMORY, "glTexPageCommitmentARB(out of memory)");
+      return;
+   }
 }

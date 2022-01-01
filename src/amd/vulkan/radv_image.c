@@ -365,6 +365,9 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
        !device->attachment_vrs_enabled)
       return false;
 
+   if (device->instance->disable_htile_layers && image->info.array_size > 1)
+      return false;
+
    return (image->info.levels == 1 || use_htile_for_mips) && !image->shareable;
 }
 
@@ -1702,9 +1705,9 @@ radv_image_print_info(struct radv_device *device, struct radv_image *image)
    fprintf(stderr,
            "  Info: size=%" PRIu64 ", alignment=%" PRIu32 ", "
            "width=%" PRIu32 ", height=%" PRIu32 ", "
-           "offset=%" PRIu64 ", array_size=%" PRIu32 "\n",
+           "offset=%" PRIu64 ", array_size=%" PRIu32 ", levels=%" PRIu32 "\n",
            image->size, image->alignment, image->info.width, image->info.height, image->offset,
-           image->info.array_size);
+           image->info.array_size, image->info.levels);
    for (unsigned i = 0; i < image->plane_count; ++i) {
       const struct radv_image_plane *plane = &image->planes[i];
       const struct radeon_surf *surf = &plane->surface;

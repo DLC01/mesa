@@ -136,4 +136,11 @@ GLuint64 st_NewImageHandle(struct gl_context *ctx, struct gl_image_unit *imgObj)
 void st_DeleteImageHandle(struct gl_context *ctx, GLuint64 handle);
 void st_MakeImageHandleResident(struct gl_context *ctx, GLuint64 handle,
                                 GLenum access, bool resident);
+GLboolean st_GetSparseTextureVirtualPageSize(struct gl_context *ctx,
+                                             GLenum target, mesa_format format,
+                                             unsigned index, int *x, int *y, int *z);
+void st_TexturePageCommitment(struct gl_context *ctx,
+                              struct gl_texture_object *tex_obj,
+                              int level, int xoffset, int yoffset, int zoffset,
+                              int width, int height, int depth, bool commit);
 #endif /* ST_CB_TEXTURE_H */

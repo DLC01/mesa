@@ -254,6 +254,15 @@ crocus_resource_configure_main(const struct crocus_screen *screen,
    if (!isl_surf_init_s(&screen->isl_dev, &res->surf, &init_info))
       return false;
 
+   /*
+    * Don't create staging surfaces that will use > half the aperture
+    * since staging implies you are sending to another resource,
+    * which there is no way to fit both into aperture.
+    */
+   if (templ->usage == PIPE_USAGE_STAGING)
+      if (res->surf.size_B > screen->aperture_threshold / 2)
+         return false;
+
    res->internal_format = templ->format;
 
    return true;
@@ -688,9 +697,10 @@ crocus_resource_create_with_modifiers(struct pipe_screen *pscreen,
        devinfo->ver < 6)
       return NULL;
 
-   UNUSED const bool isl_surf_created_successfully =
+   const bool isl_surf_created_successfully =
       crocus_resource_configure_main(screen, res, templ, modifier, 0);
-   assert(isl_surf_created_successfully);
+   if (!isl_surf_created_successfully)
+      return NULL;
 
    const char *name = "miptree";
 

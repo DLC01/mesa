@@ -431,6 +431,15 @@ if system_has_kms_drm and not with_platform_android
   c_args += '-DVK_USE_PLATFORM_DISPLAY_KHR'
   cpp_args += '-DVK_USE_PLATFORM_DISPLAY_KHR'
 endif
+if host_machine.system() == 'darwin'
+  c_args += '-DVK_USE_PLATFORM_MACOS_MVK'
+  cpp_args += '-DVK_USE_PLATFORM_MACOS_MVK'
+  c_args += '-DVK_USE_PLATFORM_METAL_EXT'
+  cpp_args += '-DVK_USE_PLATFORM_METAL_EXT'
+  #macOS seems to need beta extensions to build for now:
+  c_args += '-DVK_ENABLE_BETA_EXTENSIONS'
+  cpp_args += '-DVK_ENABLE_BETA_EXTENSIONS'
+endif
 
 _egl = get_option('egl')
 if _egl == 'true'
@@ -1558,7 +1567,7 @@ dep_libdrm_radeon = null_dep
 dep_libdrm_nouveau = null_dep
 dep_libdrm_intel = null_dep
 
-_drm_amdgpu_ver = '2.4.107'
+_drm_amdgpu_ver = '2.4.109'
 _drm_radeon_ver = '2.4.71'
 _drm_nouveau_ver = '2.4.102'
 _drm_intel_ver = '2.4.75'

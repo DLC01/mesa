@@ -235,6 +235,7 @@ enum dxil_intr {
    DXIL_INTR_BUFFER_STORE = 69,
 
    DXIL_INTR_TEXTURE_SIZE = 72,
+   DXIL_INTR_TEXTURE_GATHER = 73,
 
    DXIL_INTR_ATOMIC_BINOP = 78,
    DXIL_INTR_ATOMIC_CMPXCHG = 79,
@@ -950,6 +951,9 @@ emit_uav(struct ntd_context *ctx, unsigned binding, unsigned space, unsigned cou
    add_resource(ctx, res_kind == DXIL_RESOURCE_KIND_RAW_BUFFER ? DXIL_RES_UAV_RAW : DXIL_RES_UAV_TYPED, &layout);
    if (res_kind == DXIL_RESOURCE_KIND_RAW_BUFFER)
       ctx->mod.raw_and_structured_buffers = true;
+   if (ctx->mod.shader_kind != DXIL_PIXEL_SHADER &&
+       ctx->mod.shader_kind != DXIL_COMPUTE_SHADER)
+      ctx->mod.feats.uavs_at_every_stage = true;
 
    if (!ctx->opts->vulkan_environment) {
       for (unsigned i = 0; i < count; ++i) {
@@ -1233,6 +1237,8 @@ get_module_flags(struct ntd_context *ctx)
       flags |= (1 << 13);
    if (ctx->mod.feats.use_64uavs)
       flags |= (1 << 15);
+   if (ctx->mod.feats.uavs_at_every_stage)
+      flags |= (1 << 16);
    if (ctx->mod.feats.cs_4x_raw_sb)
       flags |= (1 << 17);
    if (ctx->mod.feats.wave_ops)
@@ -2455,10 +2461,12 @@ emit_load_ssbo(struct ntd_context *ctx, nir_intrinsic_instr *intr)
 {
    const struct dxil_value *int32_undef = get_int32_undef(&ctx->mod);
 
-   nir_variable *var = nir_get_binding_variable(ctx->shader, nir_chase_binding(intr->src[0]));
    enum dxil_resource_class class = DXIL_RESOURCE_CLASS_UAV;
-   if (var && var->data.access & ACCESS_NON_WRITEABLE)
-      class = DXIL_RESOURCE_CLASS_SRV;
+   if (ctx->opts->vulkan_environment) {
+      nir_variable *var = nir_get_binding_variable(ctx->shader, nir_chase_binding(intr->src[0]));
+      if (var && var->data.access & ACCESS_NON_WRITEABLE)
+         class = DXIL_RESOURCE_CLASS_SRV;
+   }
 
    const struct dxil_value *handle = get_ubo_ssbo_handle(ctx, &intr->src[0], class, 0);
    const struct dxil_value *offset =
@@ -3846,7 +3854,7 @@ emit_texel_fetch(struct ntd_context *ctx, struct texop_parameters *params)
 }
 
 static const struct dxil_value *
-emit_texture_lod(struct ntd_context *ctx, struct texop_parameters *params)
+emit_texture_lod(struct ntd_context *ctx, struct texop_parameters *params, bool clamped)
 {
    const struct dxil_func *func = dxil_get_function(&ctx->mod, "dx.op.calculateLOD", DXIL_F32);
    if (!func)
@@ -3859,7 +3867,30 @@ emit_texture_lod(struct ntd_context *ctx, struct texop_parameters *params)
       params->coord[0],
       params->coord[1],
       params->coord[2],
-      dxil_module_get_int1_const(&ctx->mod, 1)
+      dxil_module_get_int1_const(&ctx->mod, clamped ? 1 : 0)
+   };
+
+   return dxil_emit_call(&ctx->mod, func, args, ARRAY_SIZE(args));
+}
+
+static const struct dxil_value *
+emit_texture_gather(struct ntd_context *ctx, struct texop_parameters *params, unsigned component)
+{
+   const struct dxil_func *func = dxil_get_function(&ctx->mod, "dx.op.textureGather", params->overload);
+   if (!func)
+      return false;
+
+   const struct dxil_value *args[] = {
+      dxil_module_get_int32_const(&ctx->mod, DXIL_INTR_TEXTURE_GATHER),
+      params->tex,
+      params->sampler,
+      params->coord[0],
+      params->coord[1],
+      params->coord[2],
+      params->coord[3],
+      params->offset[0],
+      params->offset[1],
+      dxil_module_get_int32_const(&ctx->mod, component)
    };
 
    return dxil_emit_call(&ctx->mod, func, args, ARRAY_SIZE(args));
@@ -4024,9 +4055,15 @@ emit_tex(struct ntd_context *ctx, nir_tex_instr *instr)
       sample = emit_texture_size(ctx, &params);
       break;
 
+   case nir_texop_tg4:
+      sample = emit_texture_gather(ctx, &params, instr->component);
+      break;
+
    case nir_texop_lod:
-      sample = emit_texture_lod(ctx, &params);
+      sample = emit_texture_lod(ctx, &params, true);
       store_dest(ctx, &instr->dest, 0, sample, nir_alu_type_get_base_type(instr->dest_type));
+      sample = emit_texture_lod(ctx, &params, false);
+      store_dest(ctx, &instr->dest, 1, sample, nir_alu_type_get_base_type(instr->dest_type));
       return true;
 
    case nir_texop_query_levels:
@@ -4368,13 +4405,15 @@ emit_module(struct ntd_context *ctx, const struct nir_to_dxil_options *opts)
    }
 
    /* Handle read-only SSBOs as SRVs */
-   nir_foreach_variable_with_modes(var, ctx->shader, nir_var_mem_ssbo) {
-      if ((var->data.access & ACCESS_NON_WRITEABLE) != 0) {
-         unsigned count = 1;
-         if (glsl_type_is_array(var->type))
-            count = glsl_get_length(var->type);
-         if (!emit_srv(ctx, var, count))
-            return false;
+   if (ctx->opts->vulkan_environment) {
+      nir_foreach_variable_with_modes(var, ctx->shader, nir_var_mem_ssbo) {
+         if ((var->data.access & ACCESS_NON_WRITEABLE) != 0) {
+            unsigned count = 1;
+            if (glsl_type_is_array(var->type))
+               count = glsl_get_length(var->type);
+            if (!emit_srv(ctx, var, count))
+               return false;
+         }
       }
    }
 
@@ -4415,7 +4454,7 @@ emit_module(struct ntd_context *ctx, const struct nir_to_dxil_options *opts)
          return false;
       if (!emit_global_consts(ctx))
          return false;
-   } else {
+   } else if (ctx->opts->vulkan_environment) {
       /* Handle read/write SSBOs as UAVs */
       nir_foreach_variable_with_modes(var, ctx->shader, nir_var_mem_ssbo) {
          if ((var->data.access & ACCESS_NON_WRITEABLE) == 0) {
@@ -4428,6 +4467,14 @@ emit_module(struct ntd_context *ctx, const struct nir_to_dxil_options *opts)
                return false;
             
          }
+      }
+   } else {
+      for (unsigned i = 0; i < ctx->shader->info.num_ssbos; ++i) {
+         char name[64];
+         snprintf(name, sizeof(name), "__ssbo%d", i);
+         if (!emit_uav(ctx, i, 0, 1, DXIL_COMP_TYPE_INVALID,
+                       DXIL_RESOURCE_KIND_RAW_BUFFER, name))
+            return false;
       }
    }
 

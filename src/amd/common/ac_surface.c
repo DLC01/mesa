@@ -662,6 +662,7 @@ static int gfx6_compute_level(ADDR_HANDLE addrlib, const struct ac_surf_config *
       if (level == 0) {
          surf->prt_tile_width = AddrSurfInfoOut->pitchAlign;
          surf->prt_tile_height = AddrSurfInfoOut->heightAlign;
+         surf->prt_tile_depth = AddrSurfInfoOut->depthAlign;
       }
       if (surf_level->nblk_x >= surf->prt_tile_width &&
           surf_level->nblk_y >= surf->prt_tile_height) {
@@ -1647,13 +1648,9 @@ static int gfx9_compute_miptree(struct ac_addrlib *addrlib, const struct radeon_
    if (in->flags.prt) {
       surf->prt_tile_width = out.blockWidth;
       surf->prt_tile_height = out.blockHeight;
+      surf->prt_tile_depth = out.blockSlices;
 
-      for (surf->first_mip_tail_level = 0; surf->first_mip_tail_level < in->numMipLevels;
-           ++surf->first_mip_tail_level) {
-         if(mip_info[surf->first_mip_tail_level].pitch < out.blockWidth ||
-            mip_info[surf->first_mip_tail_level].height < out.blockHeight)
-            break;
-      }
+      surf->first_mip_tail_level = out.firstMipIdInTail;
 
       for (unsigned i = 0; i < in->numMipLevels; i++) {
          surf->u.gfx9.prt_level_offset[i] = mip_info[i].macroBlockOffset + mip_info[i].mipTailOffset;

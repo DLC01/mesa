@@ -294,7 +294,11 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    }
    case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
       return 140;
-
+   case PIPE_CAP_CLIP_PLANES:
+      if (devinfo->verx10 < 45)
+         return 6;
+      else
+         return 1; // defaults to MAX (8)
    case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
       /* 3DSTATE_CONSTANT_XS requires the start of UBOs to be 32B aligned */
       return 32;
@@ -351,7 +355,7 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
        * flushing, etc.  That's the big cliff apps will care about.
        */
       const unsigned gpu_mappable_megabytes =
-         (screen->aperture_bytes * 3 / 4) / (1024 * 1024);
+         (screen->aperture_threshold) / (1024 * 1024);
 
       const long system_memory_pages = sysconf(_SC_PHYS_PAGES);
       const long system_page_size = sysconf(_SC_PAGE_SIZE);
@@ -743,6 +747,7 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
    p_atomic_set(&screen->refcount, 1);
 
    screen->aperture_bytes = get_aperture_size(fd);
+   screen->aperture_threshold = screen->aperture_bytes * 3 / 4;
 
    driParseConfigFiles(config->options, config->options_info, 0, "crocus",
                        NULL, NULL, NULL, 0, NULL, 0);
