@@ -1469,18 +1469,18 @@ d3d12_set_stream_output_targets(struct pipe_context *pctx,
 }
 
 static void
-d3d12_decrement_uav_bind_count(struct d3d12_context *ctx,
+d3d12_decrement_ssbo_bind_count(struct d3d12_context *ctx,
                                enum pipe_shader_type shader,
                                struct d3d12_resource *res) {
-   assert(res->bind_counts[shader][D3D12_RESOURCE_BINDING_TYPE_UAV] > 0);
-   res->bind_counts[shader][D3D12_RESOURCE_BINDING_TYPE_UAV]--;
+   assert(res->bind_counts[shader][D3D12_RESOURCE_BINDING_TYPE_SSBO] > 0);
+   res->bind_counts[shader][D3D12_RESOURCE_BINDING_TYPE_SSBO]--;
 }
 
 static void
-d3d12_increment_uav_bind_count(struct d3d12_context *ctx,
+d3d12_increment_ssbo_bind_count(struct d3d12_context *ctx,
                                enum pipe_shader_type shader,
                                struct d3d12_resource *res) {
-   res->bind_counts[shader][D3D12_RESOURCE_BINDING_TYPE_UAV]++;
+   res->bind_counts[shader][D3D12_RESOURCE_BINDING_TYPE_SSBO]++;
 }
 
 static void
@@ -1494,7 +1494,7 @@ d3d12_set_shader_buffers(struct pipe_context *pctx,
    for (unsigned i = 0; i < count; ++i) {
       struct pipe_shader_buffer *slot = &ctx->ssbo_views[shader][i + start_slot];
       if (slot->buffer) {
-         d3d12_decrement_uav_bind_count(ctx, shader, d3d12_resource(slot->buffer));
+         d3d12_decrement_ssbo_bind_count(ctx, shader, d3d12_resource(slot->buffer));
          pipe_resource_reference(&slot->buffer, NULL);
       }
 
@@ -1502,7 +1502,7 @@ d3d12_set_shader_buffers(struct pipe_context *pctx,
          pipe_resource_reference(&slot->buffer, buffers[i].buffer);
          slot->buffer_offset = buffers[i].buffer_offset;
          slot->buffer_size = buffers[i].buffer_size;
-         d3d12_increment_uav_bind_count(ctx, shader, d3d12_resource(buffers[i].buffer));
+         d3d12_increment_ssbo_bind_count(ctx, shader, d3d12_resource(buffers[i].buffer));
       } else
          memset(slot, 0, sizeof(*slot));
    }
@@ -1518,7 +1518,115 @@ d3d12_set_shader_buffers(struct pipe_context *pctx,
          }
       }
    }
-   ctx->shader_dirty[shader] |= D3D12_SHADER_DIRTY_UAVS;
+   ctx->shader_dirty[shader] |= D3D12_SHADER_DIRTY_SSBO;
+}
+
+static void
+d3d12_decrement_image_bind_count(struct d3d12_context *ctx,
+                               enum pipe_shader_type shader,
+                               struct d3d12_resource *res) {
+   assert(res->bind_counts[shader][D3D12_RESOURCE_BINDING_TYPE_IMAGE] > 0);
+   res->bind_counts[shader][D3D12_RESOURCE_BINDING_TYPE_IMAGE]--;
+}
+
+static void
+d3d12_increment_image_bind_count(struct d3d12_context *ctx,
+                               enum pipe_shader_type shader,
+                               struct d3d12_resource *res) {
+   res->bind_counts[shader][D3D12_RESOURCE_BINDING_TYPE_IMAGE]++;
+}
+
+static bool
+is_valid_uav_cast(enum pipe_format resource_format, enum pipe_format view_format)
+{
+   if (view_format != PIPE_FORMAT_R32_UINT &&
+       view_format != PIPE_FORMAT_R32_SINT &&
+       view_format != PIPE_FORMAT_R32_FLOAT)
+      return false;
+   switch (d3d12_get_typeless_format(resource_format)) {
+   case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+   case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+   case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+   case DXGI_FORMAT_R16G16_TYPELESS:
+   case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static enum pipe_format
+get_shader_image_emulation_format(enum pipe_format resource_format)
+{
+#define CASE(f) case DXGI_FORMAT_##f##_TYPELESS: return PIPE_FORMAT_##f##_UINT
+   switch (d3d12_get_typeless_format(resource_format)) {
+      CASE(R8);
+      CASE(R8G8);
+      CASE(R8G8B8A8);
+      CASE(R16);
+      CASE(R16G16);
+      CASE(R16G16B16A16);
+      CASE(R32);
+      CASE(R32G32);
+      CASE(R32G32B32A32);
+      CASE(R10G10B10A2);
+   case DXGI_FORMAT_R11G11B10_FLOAT:
+      return PIPE_FORMAT_R11G11B10_FLOAT;
+   default:
+      unreachable("Unexpected shader image resource format");
+   }
+}
+
+static void
+d3d12_set_shader_images(struct pipe_context *pctx,
+                        enum pipe_shader_type shader,
+                        unsigned start_slot, unsigned count,
+                        unsigned unbind_num_trailing_slots,
+                        const struct pipe_image_view *images)
+{
+   struct d3d12_context *ctx = d3d12_context(pctx);
+   for (unsigned i = 0; i < count + unbind_num_trailing_slots; ++i) {
+      struct pipe_image_view *slot = &ctx->image_views[shader][i + start_slot];
+      if (slot->resource) {
+         d3d12_decrement_image_bind_count(ctx, shader, d3d12_resource(slot->resource));
+         pipe_resource_reference(&slot->resource, NULL);
+      }
+
+      enum pipe_format emulation_format = PIPE_FORMAT_NONE;
+      if (i < count && images && images[i].resource) {
+         pipe_resource_reference(&slot->resource, images[i].resource);
+         *slot = images[i];
+         d3d12_increment_image_bind_count(ctx, shader, d3d12_resource(images[i].resource));
+
+         if (images[i].resource->target != PIPE_BUFFER &&
+             !is_valid_uav_cast(images[i].resource->format, images[i].format) &&
+             d3d12_get_typeless_format(images[i].format) !=
+             d3d12_get_typeless_format(images[i].resource->format)) {
+            /* Can't use D3D casting, have to use shader lowering instead */
+            emulation_format =
+               get_shader_image_emulation_format(images[i].resource->format);
+         }
+      } else
+         memset(slot, 0, sizeof(*slot));
+
+      if (ctx->image_view_emulation_formats[shader][i] != emulation_format) {
+         ctx->image_view_emulation_formats[shader][i] = emulation_format;
+         ctx->state_dirty |= D3D12_DIRTY_SHADER;
+      }
+   }
+
+   if (images) {
+      ctx->num_image_views[shader] = MAX2(ctx->num_image_views[shader], count + start_slot);
+   } else {
+      ctx->num_image_views[shader] = 0;
+      for (int i = start_slot + count - 1; i >= (int)start_slot; --i) {
+         if (ctx->image_views[shader][i].resource) {
+            ctx->num_image_views[shader] = i;
+            break;
+         }
+      }
+   }
+   ctx->shader_dirty[shader] |= D3D12_SHADER_DIRTY_IMAGE;
 }
 
 static void
@@ -1534,8 +1642,12 @@ d3d12_invalidate_context_bindings(struct d3d12_context *ctx, struct d3d12_resour
          ctx->shader_dirty[i] |= D3D12_SHADER_DIRTY_SAMPLER_VIEWS;
       }
 
-      if (res->bind_counts[i][D3D12_RESOURCE_BINDING_TYPE_UAV] > 0) {
-         ctx->shader_dirty[i] |= D3D12_SHADER_DIRTY_UAVS;
+      if (res->bind_counts[i][D3D12_RESOURCE_BINDING_TYPE_SSBO] > 0) {
+         ctx->shader_dirty[i] |= D3D12_SHADER_DIRTY_SSBO;
+      }
+
+      if (res->bind_counts[i][D3D12_RESOURCE_BINDING_TYPE_IMAGE] > 0) {
+         ctx->shader_dirty[i] |= D3D12_SHADER_DIRTY_IMAGE;
       }
    }
 }
@@ -1966,6 +2078,54 @@ d3d12_replace_buffer_storage(struct pipe_context *pctx,
    d3d12_bo_unreference(old_bo);
 }
 
+static void
+d3d12_memory_barrier(struct pipe_context *pctx, unsigned flags)
+{
+   struct d3d12_context *ctx = d3d12_context(pctx);
+   if (flags & PIPE_BARRIER_VERTEX_BUFFER)
+      ctx->state_dirty |= D3D12_DIRTY_VERTEX_BUFFERS;
+   if (flags & PIPE_BARRIER_INDEX_BUFFER)
+      ctx->state_dirty |= D3D12_DIRTY_INDEX_BUFFER;
+   if (flags & PIPE_BARRIER_FRAMEBUFFER)
+      ctx->state_dirty |= D3D12_DIRTY_FRAMEBUFFER;
+   if (flags & PIPE_BARRIER_STREAMOUT_BUFFER)
+      ctx->state_dirty |= D3D12_DIRTY_STREAM_OUTPUT;
+
+   /* TODO:
+    * PIPE_BARRIER_INDIRECT_BUFFER
+    */
+
+   for (unsigned i = 0; i < D3D12_GFX_SHADER_STAGES; ++i) {
+      if (flags & PIPE_BARRIER_CONSTANT_BUFFER)
+         ctx->shader_dirty[i] |= D3D12_SHADER_DIRTY_CONSTBUF;
+      if (flags & PIPE_BARRIER_TEXTURE)
+         ctx->shader_dirty[i] |= D3D12_SHADER_DIRTY_SAMPLER_VIEWS;
+      if (flags & PIPE_BARRIER_SHADER_BUFFER)
+         ctx->shader_dirty[i] |= D3D12_SHADER_DIRTY_SSBO;
+      if (flags & PIPE_BARRIER_IMAGE)
+         ctx->shader_dirty[i] |= D3D12_SHADER_DIRTY_IMAGE;
+   }
+   
+   /* Indicate that UAVs shouldn't override transitions. Ignore barriers that are only
+    * for UAVs or other fixed-function state that doesn't need a draw to resolve.
+    */
+   const unsigned ignored_barrier_flags =
+      PIPE_BARRIER_IMAGE |
+      PIPE_BARRIER_SHADER_BUFFER |
+      PIPE_BARRIER_UPDATE |
+      PIPE_BARRIER_MAPPED_BUFFER |
+      PIPE_BARRIER_QUERY_BUFFER;
+   d3d12_current_batch(ctx)->pending_memory_barrier = (flags & ~ignored_barrier_flags) != 0;
+
+   if (flags & (PIPE_BARRIER_IMAGE | PIPE_BARRIER_SHADER_BUFFER)) {
+      D3D12_RESOURCE_BARRIER uavBarrier;
+      uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+      uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+      uavBarrier.UAV.pResource = nullptr;
+      ctx->cmdlist->ResourceBarrier(1, &uavBarrier);
+   }
+}
+
 struct pipe_context *
 d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 {
@@ -2032,6 +2192,7 @@ d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.set_stream_output_targets = d3d12_set_stream_output_targets;
 
    ctx->base.set_shader_buffers = d3d12_set_shader_buffers;
+   ctx->base.set_shader_images = d3d12_set_shader_images;
 
    ctx->base.get_timestamp = d3d12_get_timestamp;
 
@@ -2041,6 +2202,8 @@ d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.draw_vbo = d3d12_draw_vbo;
    ctx->base.flush = d3d12_flush;
    ctx->base.flush_resource = d3d12_flush_resource;
+
+   ctx->base.memory_barrier = d3d12_memory_barrier;
 
    ctx->gfx_pipeline_state.sample_mask = ~0;
 

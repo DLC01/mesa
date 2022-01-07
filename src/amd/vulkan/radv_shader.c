@@ -39,7 +39,6 @@
 
 #include "util/debug.h"
 #include "ac_binary.h"
-#include "ac_exp_param.h"
 #include "ac_nir.h"
 #include "ac_rtld.h"
 #include "aco_interface.h"
@@ -403,12 +402,30 @@ radv_lower_primitive_shading_rate(nir_shader *nir)
          nir_ssa_def *y_rate = nir_iand(&b, val, nir_imm_int(&b, 3));
          y_rate = nir_b2i32(&b, nir_ine(&b, y_rate, nir_imm_int(&b, 0)));
 
-         /* Bits [2:3] = VRS rate X
-          * Bits [4:5] = VRS rate Y
-          * HW shading rate = (xRate << 2) | (yRate << 4)
-          */
-         nir_ssa_def *out = nir_ior(&b, nir_ishl(&b, x_rate, nir_imm_int(&b, 2)),
-                                        nir_ishl(&b, y_rate, nir_imm_int(&b, 4)));
+         nir_ssa_def *out = NULL;
+
+         if (nir->info.stage == MESA_SHADER_MESH) {
+            /* MS:
+             * Primitive shading rate is a per-primitive output, it is
+             * part of the second channel of the primitive export.
+             *
+             * Bits [28:29] = VRS rate X
+             * Bits [30:31] = VRS rate Y
+             * This will be added to the other bits of that channel in the backend.
+             */
+            out = nir_ior(&b, nir_ishl(&b, x_rate, nir_imm_int(&b, 28)),
+                              nir_ishl(&b, y_rate, nir_imm_int(&b, 30)));
+         } else {
+            /* VS, TES, GS:
+             * Primitive shading rate is a per-vertex output pos export.
+             *
+             * Bits [2:3] = VRS rate X
+             * Bits [4:5] = VRS rate Y
+             * HW shading rate = (xRate << 2) | (yRate << 4)
+             */
+            out = nir_ior(&b, nir_ishl(&b, x_rate, nir_imm_int(&b, 2)),
+                              nir_ishl(&b, y_rate, nir_imm_int(&b, 4)));
+         }
 
          nir_instr_rewrite_src(&intr->instr, &intr->src[1], nir_src_for_ssa(out));
 
@@ -761,7 +778,8 @@ radv_shader_compile_to_nir(struct radv_device *device, struct vk_shader_module *
 
    /* Lower primitive shading rate to match HW requirements. */
    if ((nir->info.stage == MESA_SHADER_VERTEX ||
-        nir->info.stage == MESA_SHADER_GEOMETRY) &&
+        nir->info.stage == MESA_SHADER_GEOMETRY ||
+        nir->info.stage == MESA_SHADER_MESH) &&
        nir->info.outputs_written & BITFIELD64_BIT(VARYING_SLOT_PRIMITIVE_SHADING_RATE)) {
       NIR_PASS_V(nir, radv_lower_primitive_shading_rate);
    }
@@ -1353,7 +1371,7 @@ radv_postprocess_config(const struct radv_device *device, const struct ac_shader
    unsigned num_input_vgprs = args->ac.num_vgprs_used;
 
    if (stage == MESA_SHADER_FRAGMENT) {
-      num_input_vgprs = ac_get_fs_input_vgpr_cnt(config_in, NULL, NULL);
+      num_input_vgprs = ac_get_fs_input_vgpr_cnt(config_in, NULL, NULL, NULL);
    }
 
    unsigned num_vgprs = MAX2(config_in->num_vgprs, num_input_vgprs);
@@ -1973,11 +1991,12 @@ radv_create_trap_handler_shader(struct radv_device *device)
 static struct radv_shader_prolog *
 upload_vs_prolog(struct radv_device *device, struct radv_prolog_binary *bin, unsigned wave_size)
 {
+   uint32_t code_size = radv_get_shader_binary_size(bin->code_size);
    struct radv_shader_prolog *prolog = malloc(sizeof(struct radv_shader_prolog));
    if (!prolog)
       return NULL;
 
-   prolog->alloc = radv_alloc_shader_memory(device, bin->code_size, NULL);
+   prolog->alloc = radv_alloc_shader_memory(device, code_size, NULL);
    if (!prolog->alloc) {
       free(prolog);
       return NULL;
@@ -1988,9 +2007,15 @@ upload_vs_prolog(struct radv_device *device, struct radv_prolog_binary *bin, uns
 
    memcpy(dest_ptr, bin->data, bin->code_size);
 
+   /* Add end-of-code markers for the UMR disassembler. */
+   uint32_t *ptr32 = (uint32_t *)dest_ptr + bin->code_size / 4;
+   for (unsigned i = 0; i < DEBUGGER_NUM_MARKERS; i++)
+      ptr32[i] = DEBUGGER_END_OF_CODE_MARKER;
+
    prolog->rsrc1 = S_00B848_VGPRS((bin->num_vgprs - 1) / (wave_size == 32 ? 8 : 4)) |
                    S_00B228_SGPRS((bin->num_sgprs - 1) / 8);
    prolog->num_preserved_sgprs = bin->num_preserved_sgprs;
+   prolog->disasm_string = NULL;
 
    return prolog;
 }
@@ -2005,6 +2030,7 @@ radv_create_vs_prolog(struct radv_device *device, const struct radv_vs_prolog_ke
    options.info = &device->physical_device->rad_info;
    options.address32_hi = device->physical_device->rad_info.address32_hi;
    options.dump_shader = device->instance->debug_flags & RADV_DEBUG_DUMP_PROLOGS;
+   options.record_ir = device->instance->debug_flags & RADV_DEBUG_HANG;
 
    struct radv_shader_info info = {0};
    info.wave_size = key->wave32 ? 32 : 64;
@@ -2024,7 +2050,7 @@ radv_create_vs_prolog(struct radv_device *device, const struct radv_vs_prolog_ke
    info.user_sgprs_locs = args.user_sgprs_locs;
 
 #ifdef LLVM_AVAILABLE
-   if (options.dump_shader)
+   if (options.dump_shader || options.record_ir)
       ac_init_llvm_once();
 #endif
 
@@ -2033,8 +2059,16 @@ radv_create_vs_prolog(struct radv_device *device, const struct radv_vs_prolog_ke
    struct radv_shader_prolog *prolog = upload_vs_prolog(device, binary, info.wave_size);
    if (prolog) {
       prolog->nontrivial_divisors = key->state->nontrivial_divisors;
+      prolog->disasm_string =
+         binary->disasm_size ? strdup((const char *)(binary->data + binary->code_size)) : NULL;
    }
+
    free(binary);
+
+   if (prolog && options.dump_shader) {
+      fprintf(stderr, "Vertex prolog");
+      fprintf(stderr, "\ndisasm:\n%s\n", prolog->disasm_string);
+   }
 
    return prolog;
 }
@@ -2060,6 +2094,7 @@ radv_prolog_destroy(struct radv_device *device, struct radv_shader_prolog *prolo
       return;
 
    radv_free_shader_memory(device, prolog->alloc);
+   free(prolog->disasm_string);
    free(prolog);
 }
 

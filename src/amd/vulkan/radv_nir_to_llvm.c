@@ -33,7 +33,7 @@
 #include "radv_shader_args.h"
 
 #include "ac_binary.h"
-#include "ac_exp_param.h"
+#include "ac_nir.h"
 #include "ac_llvm_build.h"
 #include "ac_nir_to_llvm.h"
 #include "ac_shader_abi.h"
@@ -338,7 +338,7 @@ visit_emit_vertex_with_counter(struct ac_shader_abi *abi, unsigned stream, LLVMV
          out_val = ac_to_integer(&ctx->ac, out_val);
          out_val = LLVMBuildZExtOrBitCast(ctx->ac.builder, out_val, ctx->ac.i32, "");
 
-         ac_build_buffer_store_dword(&ctx->ac, ctx->gsvs_ring[stream], out_val, 1, voffset,
+         ac_build_buffer_store_dword(&ctx->ac, ctx->gsvs_ring[stream], out_val, NULL, voffset,
                                      ac_get_arg(&ctx->ac, ctx->args->ac.gs2vs_offset), 0,
                                      ac_glc | ac_slc | ac_swizzled);
       }
@@ -1092,19 +1092,14 @@ radv_emit_stream_output(struct radv_shader_context *ctx, LLVMValueRef const *so_
       vdata = out[0];
       break;
    case 2: /* as v2i32 */
-   case 3: /* as v4i32 (aligned to 4) */
-      out[3] = LLVMGetUndef(ctx->ac.i32);
-      FALLTHROUGH;
+   case 3: /* as v3i32 */
    case 4: /* as v4i32 */
-      vdata = ac_build_gather_values(&ctx->ac, out,
-                                     !ac_has_vec3_support(ctx->ac.chip_class, false)
-                                        ? util_next_power_of_two(num_comps)
-                                        : num_comps);
+      vdata = ac_build_gather_values(&ctx->ac, out, num_comps);
       break;
    }
 
-   ac_build_buffer_store_dword(&ctx->ac, so_buffers[buf], vdata, num_comps, so_write_offsets[buf],
-                               ctx->ac.i32_0, offset, ac_glc | ac_slc);
+   ac_build_buffer_store_dword(&ctx->ac, so_buffers[buf], vdata, NULL,
+                               so_write_offsets[buf], ctx->ac.i32_0, offset, ac_glc | ac_slc);
 }
 
 static void
@@ -2095,7 +2090,7 @@ radv_export_mrt_z(struct radv_shader_context *ctx, LLVMValueRef depth, LLVMValue
 {
    struct ac_export_args args;
 
-   ac_export_mrt_z(&ctx->ac, depth, stencil, samplemask, &args);
+   ac_export_mrt_z(&ctx->ac, depth, stencil, samplemask, true, &args);
 
    ac_build_export(&ctx->ac, &args);
 }

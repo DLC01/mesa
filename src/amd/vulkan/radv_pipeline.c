@@ -41,7 +41,6 @@
 
 #include "util/debug.h"
 #include "ac_binary.h"
-#include "ac_exp_param.h"
 #include "ac_nir.h"
 #include "ac_shader_util.h"
 #include "aco_interface.h"
@@ -1258,9 +1257,6 @@ gfx103_pipeline_init_vrs_state(struct radv_pipeline *pipeline,
    } else {
       vrs->pa_cl_vrs_cntl = S_028848_SAMPLE_ITER_COMBINER_MODE(V_028848_VRS_COMB_MODE_PASSTHRU);
    }
-
-   /* The primitive combiner is always passthrough. */
-   vrs->pa_cl_vrs_cntl |= S_028848_PRIMITIVE_RATE_COMBINER_MODE(V_028848_VRS_COMB_MODE_PASSTHRU);
 }
 
 static bool
@@ -4768,8 +4764,15 @@ radv_pipeline_generate_hw_vs(struct radeon_cmdbuf *ctx_cs, struct radeon_cmdbuf 
                          shader->config.scratch_bytes_per_wave > 0, &late_alloc_wave64, &cu_mask);
 
    if (pipeline->device->physical_device->rad_info.chip_class >= GFX7) {
-      radeon_set_sh_reg_idx(pipeline->device->physical_device, cs, R_00B118_SPI_SHADER_PGM_RSRC3_VS, 3,
-                            S_00B118_CU_EN(cu_mask) | S_00B118_WAVE_LIMIT(0x3F));
+      if (pipeline->device->physical_device->rad_info.chip_class >= GFX10) {
+         ac_set_reg_cu_en(cs, R_00B118_SPI_SHADER_PGM_RSRC3_VS,
+                          S_00B118_CU_EN(cu_mask) | S_00B118_WAVE_LIMIT(0x3F),
+                          C_00B118_CU_EN, 0, &pipeline->device->physical_device->rad_info,
+                          (void*)gfx10_set_sh_reg_idx3);
+      } else {
+         radeon_set_sh_reg_idx(pipeline->device->physical_device, cs, R_00B118_SPI_SHADER_PGM_RSRC3_VS, 3,
+                               S_00B118_CU_EN(cu_mask) | S_00B118_WAVE_LIMIT(0x3F));
+      }
       radeon_set_sh_reg(cs, R_00B11C_SPI_SHADER_LATE_ALLOC_VS, S_00B11C_LIMIT(late_alloc_wave64));
    }
    if (pipeline->device->physical_device->rad_info.chip_class >= GFX10) {
@@ -4835,8 +4838,11 @@ radv_pipeline_generate_hw_ngg(struct radeon_cmdbuf *ctx_cs, struct radeon_cmdbuf
    cull_dist_mask = outinfo->cull_dist_mask;
    total_mask = clip_dist_mask | cull_dist_mask;
 
+   /* Primitive shading rate is written as a per-primitive output in mesh shaders. */
+   bool force_vrs_per_vertex =
+      pipeline->device->force_vrs != RADV_FORCE_VRS_NONE && es_type != MESA_SHADER_MESH;
    bool writes_primitive_shading_rate =
-      outinfo->writes_primitive_shading_rate || pipeline->device->force_vrs != RADV_FORCE_VRS_NONE;
+      outinfo->writes_primitive_shading_rate || force_vrs_per_vertex;
    bool misc_vec_ena = outinfo->writes_pointsize || outinfo->writes_layer ||
                        outinfo->writes_viewport_index || writes_primitive_shading_rate;
    bool es_enable_prim_id = outinfo->export_prim_id || (es && es->info.uses_prim_id);
@@ -4861,7 +4867,8 @@ radv_pipeline_generate_hw_ngg(struct radeon_cmdbuf *ctx_cs, struct radeon_cmdbuf
 
    unsigned idx_format = V_028708_SPI_SHADER_1COMP;
    if (outinfo->writes_layer_per_primitive ||
-       outinfo->writes_viewport_index_per_primitive)
+       outinfo->writes_viewport_index_per_primitive ||
+       outinfo->writes_primitive_shading_rate_per_primitive)
       idx_format = V_028708_SPI_SHADER_2COMP;
 
    radeon_set_context_reg(ctx_cs, R_028708_SPI_SHADER_IDX_FORMAT,
@@ -4937,12 +4944,23 @@ radv_pipeline_generate_hw_ngg(struct radeon_cmdbuf *ctx_cs, struct radeon_cmdbuf
    ac_compute_late_alloc(&pipeline->device->physical_device->rad_info, true, shader->info.has_ngg_culling,
                          shader->config.scratch_bytes_per_wave > 0, &late_alloc_wave64, &cu_mask);
 
-   radeon_set_sh_reg_idx(
-      pipeline->device->physical_device, cs, R_00B21C_SPI_SHADER_PGM_RSRC3_GS, 3,
-      S_00B21C_CU_EN(cu_mask) | S_00B21C_WAVE_LIMIT(0x3F));
-   radeon_set_sh_reg_idx(
-      pipeline->device->physical_device, cs, R_00B204_SPI_SHADER_PGM_RSRC4_GS, 3,
-      S_00B204_CU_EN(0xffff) | S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(late_alloc_wave64));
+   if (pipeline->device->physical_device->rad_info.chip_class >= GFX10) {
+      ac_set_reg_cu_en(cs, R_00B21C_SPI_SHADER_PGM_RSRC3_GS,
+                       S_00B21C_CU_EN(cu_mask) | S_00B21C_WAVE_LIMIT(0x3F),
+                       C_00B21C_CU_EN, 0, &pipeline->device->physical_device->rad_info,
+                       (void*)gfx10_set_sh_reg_idx3);
+      ac_set_reg_cu_en(cs, R_00B204_SPI_SHADER_PGM_RSRC4_GS,
+                       S_00B204_CU_EN(0xffff) | S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(late_alloc_wave64),
+                       C_00B204_CU_EN, 16, &pipeline->device->physical_device->rad_info,
+                       (void*)gfx10_set_sh_reg_idx3);
+   } else {
+      radeon_set_sh_reg_idx(
+         pipeline->device->physical_device, cs, R_00B21C_SPI_SHADER_PGM_RSRC3_GS, 3,
+         S_00B21C_CU_EN(cu_mask) | S_00B21C_WAVE_LIMIT(0x3F));
+      radeon_set_sh_reg_idx(
+         pipeline->device->physical_device, cs, R_00B204_SPI_SHADER_PGM_RSRC4_GS, 3,
+         S_00B204_CU_EN(0xffff) | S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(late_alloc_wave64));
+   }
 
    uint32_t oversub_pc_lines = late_alloc_wave64 ? pipeline->device->physical_device->rad_info.pc_lines / 4 : 0;
    if (shader->info.has_ngg_culling) {
@@ -5184,7 +5202,16 @@ radv_pipeline_generate_hw_gs(struct radeon_cmdbuf *ctx_cs, struct radeon_cmdbuf 
       radeon_emit(cs, gs->config.rsrc2);
    }
 
-   if (pipeline->device->physical_device->rad_info.chip_class >= GFX7) {
+   if (pipeline->device->physical_device->rad_info.chip_class >= GFX10) {
+      ac_set_reg_cu_en(cs, R_00B21C_SPI_SHADER_PGM_RSRC3_GS,
+                       S_00B21C_CU_EN(0xffff) | S_00B21C_WAVE_LIMIT(0x3F),
+                       C_00B21C_CU_EN, 0, &pipeline->device->physical_device->rad_info,
+                       (void*)gfx10_set_sh_reg_idx3);
+      ac_set_reg_cu_en(cs, R_00B204_SPI_SHADER_PGM_RSRC4_GS,
+                       S_00B204_CU_EN(0xffff) | S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(0),
+                       C_00B204_CU_EN, 16, &pipeline->device->physical_device->rad_info,
+                       (void*)gfx10_set_sh_reg_idx3);
+   } else if (pipeline->device->physical_device->rad_info.chip_class >= GFX7) {
       radeon_set_sh_reg_idx(
          pipeline->device->physical_device, cs, R_00B21C_SPI_SHADER_PGM_RSRC3_GS, 3,
          S_00B21C_CU_EN(0xffff) | S_00B21C_WAVE_LIMIT(0x3F));
@@ -5637,7 +5664,8 @@ gfx103_pipeline_generate_vgt_draw_payload_cntl(struct radeon_cmdbuf *ctx_cs,
    bool enable_prim_payload =
       outinfo &&
       (outinfo->writes_viewport_index_per_primitive ||
-       outinfo->writes_layer_per_primitive);
+       outinfo->writes_layer_per_primitive ||
+       outinfo->writes_primitive_shading_rate_per_primitive);
 
    radeon_set_context_reg(ctx_cs, R_028A98_VGT_DRAW_PAYLOAD_CNTL,
                           S_028A98_EN_VRS_RATE(enable_vrs) |

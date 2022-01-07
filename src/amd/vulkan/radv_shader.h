@@ -198,6 +198,7 @@ struct radv_vs_output_info {
    bool writes_viewport_index;
    bool writes_viewport_index_per_primitive;
    bool writes_primitive_shading_rate;
+   bool writes_primitive_shading_rate_per_primitive;
    bool export_prim_id;
    bool export_prim_id_per_primitive;
    bool export_clip_dists;
@@ -436,6 +437,7 @@ struct radv_prolog_binary {
    uint8_t num_vgprs;
    uint8_t num_preserved_sgprs;
    unsigned code_size;
+   unsigned disasm_size;
    uint8_t data[0];
 };
 
@@ -487,6 +489,9 @@ struct radv_shader_prolog {
    uint32_t rsrc1;
    uint8_t num_preserved_sgprs;
    bool nontrivial_divisors;
+
+   /* debug only */
+   char *disasm_string;
 };
 
 void radv_optimize_nir(const struct radv_device *device, struct nir_shader *shader,

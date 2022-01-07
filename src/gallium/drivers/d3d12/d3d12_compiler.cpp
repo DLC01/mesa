@@ -180,6 +180,7 @@ compile_nir(struct d3d12_context *ctx, struct d3d12_shader_selector *sel,
    opts.lower_int16 = !screen->opts4.Native16BitShaderOpsSupported;
    opts.ubo_binding_offset = shader->has_default_ubo0 ? 0 : 1;
    opts.provoking_vertex = key->fs.provoking_vertex;
+   opts.environment = DXIL_ENVIRONMENT_GL;
 
    struct blob tmp;
    if (!nir_to_dxil(nir, &opts, &tmp)) {
@@ -190,15 +191,23 @@ compile_nir(struct d3d12_context *ctx, struct d3d12_shader_selector *sel,
    // Non-ubo variables
    shader->begin_srv_binding = (UINT_MAX);
    nir_foreach_variable_with_modes(var, nir, nir_var_uniform) {
-      auto type = glsl_without_array(var->type);
-      if (glsl_type_is_texture(type)) {
+      auto type_no_array = glsl_without_array(var->type);
+      if (glsl_type_is_texture(type_no_array)) {
          unsigned count = glsl_type_is_array(var->type) ? glsl_get_aoa_size(var->type) : 1;
          for (unsigned i = 0; i < count; ++i) {
-            shader->srv_bindings[var->data.binding + i].binding = var->data.binding;
-            shader->srv_bindings[var->data.binding + i].dimension = resource_dimension(glsl_get_sampler_dim(type));
+            shader->srv_bindings[var->data.binding + i].dimension = resource_dimension(glsl_get_sampler_dim(type_no_array));
          }
          shader->begin_srv_binding = MIN2(var->data.binding, shader->begin_srv_binding);
          shader->end_srv_binding = MAX2(var->data.binding + count, shader->end_srv_binding);
+      }
+   }
+
+   nir_foreach_image_variable(var, nir) {
+      auto type_no_array = glsl_without_array(var->type);
+      unsigned count = glsl_type_is_array(var->type) ? glsl_get_aoa_size(var->type) : 1;
+      for (unsigned i = 0; i < count; ++i) {
+         shader->uav_bindings[var->data.driver_location + i].format = var->data.image.format;
+         shader->uav_bindings[var->data.driver_location + i].dimension = resource_dimension(glsl_get_sampler_dim(type_no_array));
       }
    }
 
@@ -624,6 +633,9 @@ d3d12_compare_shader_keys(const d3d12_shader_key *expect, const d3d12_shader_key
    if (expect->n_texture_states != have->n_texture_states)
       return false;
 
+   if (expect->n_images != have->n_images)
+      return false;
+
    if (memcmp(expect->tex_wrap_states, have->tex_wrap_states,
               expect->n_texture_states * sizeof(dxil_wrap_sampler_state)))
       return false;
@@ -634,6 +646,10 @@ d3d12_compare_shader_keys(const d3d12_shader_key *expect, const d3d12_shader_key
 
    if (memcmp(expect->sampler_compare_funcs, have->sampler_compare_funcs,
               expect->n_texture_states * sizeof(enum compare_func)))
+      return false;
+
+   if (memcmp(expect->image_format_conversion, have->image_format_conversion,
+      expect->n_images * sizeof(struct d3d12_image_format_conversion_info)))
       return false;
 
    if (expect->invert_depth != have->invert_depth)
@@ -795,6 +811,13 @@ d3d12_fill_shader_key(struct d3d12_selection_context *sel_ctx,
        sel_ctx->ctx->gfx_stages[PIPE_SHADER_GEOMETRY]->gs_key.has_front_face) {
       key->fs.remap_front_facing = 1;
    }
+
+   key->n_images = sel_ctx->ctx->num_image_views[stage];
+   for (int i = 0; i < key->n_images; ++i) {
+      key->image_format_conversion[i].emulated_format = sel_ctx->ctx->image_view_emulation_formats[stage][i];
+      if (key->image_format_conversion[i].emulated_format != PIPE_FORMAT_NONE)
+         key->image_format_conversion[i].view_format = sel_ctx->ctx->image_views[stage][i].format;
+   }
 }
 
 static void
@@ -877,6 +900,9 @@ select_shader_variant(struct d3d12_selection_context *sel_ctx, d3d12_shader_sele
       NIR_PASS_V(new_nir_variant, d3d12_lower_uint_cast, false);
    if (key.fs.cast_to_int)
       NIR_PASS_V(new_nir_variant, d3d12_lower_uint_cast, true);
+
+   if (key.n_images)
+      NIR_PASS_V(new_nir_variant, d3d12_lower_image_casts, key.image_format_conversion);
 
    {
       struct nir_lower_tex_options tex_options = { };

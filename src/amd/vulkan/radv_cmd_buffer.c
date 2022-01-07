@@ -758,6 +758,23 @@ radv_save_vertex_descriptors(struct radv_cmd_buffer *cmd_buffer, uint64_t vb_ptr
    radv_emit_write_data_packet(cmd_buffer, V_370_ME, va, 2, data);
 }
 
+static void
+radv_save_vs_prolog(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader_prolog *prolog)
+{
+   struct radv_device *device = cmd_buffer->device;
+   uint32_t data[2];
+   uint64_t va;
+
+   va = radv_buffer_get_va(device->trace_bo);
+   va += 32;
+
+   uint64_t prolog_address = (uintptr_t)prolog;
+   data[0] = prolog_address;
+   data[1] = prolog_address >> 32;
+
+   radv_emit_write_data_packet(cmd_buffer, V_370_ME, va, 2, data);
+}
+
 void
 radv_set_descriptor_set(struct radv_cmd_buffer *cmd_buffer, VkPipelineBindPoint bind_point,
                         struct radv_descriptor_set *set, unsigned idx)
@@ -779,7 +796,7 @@ radv_save_descriptors(struct radv_cmd_buffer *cmd_buffer, VkPipelineBindPoint bi
    struct radv_device *device = cmd_buffer->device;
    uint32_t data[MAX_SETS * 2] = {0};
    uint64_t va;
-   va = radv_buffer_get_va(device->trace_bo) + 32;
+   va = radv_buffer_get_va(device->trace_bo) + 40;
 
    u_foreach_bit(i, descriptors_state->valid)
    {
@@ -1633,7 +1650,7 @@ radv_emit_fragment_shading_rate(struct radv_cmd_buffer *cmd_buffer)
    uint32_t rate_x = MIN2(2, d->fragment_shading_rate.size.width) - 1;
    uint32_t rate_y = MIN2(2, d->fragment_shading_rate.size.height) - 1;
    uint32_t pa_cl_vrs_cntl = pipeline->graphics.vrs.pa_cl_vrs_cntl;
-   uint32_t vertex_comb_mode = d->fragment_shading_rate.combiner_ops[0];
+   uint32_t pipeline_comb_mode = d->fragment_shading_rate.combiner_ops[0];
    uint32_t htile_comb_mode = d->fragment_shading_rate.combiner_ops[1];
 
    assert(cmd_buffer->device->physical_device->rad_info.chip_class >= GFX10_3);
@@ -1653,7 +1670,7 @@ radv_emit_fragment_shading_rate(struct radv_cmd_buffer *cmd_buffer)
          /* As the result of min(A, 1x1) or replace(A, 1x1) are always 1x1, set the vertex rate
           * combiner mode as passthrough.
           */
-         vertex_comb_mode = V_028848_VRS_COMB_MODE_PASSTHRU;
+         pipeline_comb_mode = V_028848_VRS_COMB_MODE_PASSTHRU;
          break;
       case VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_KHR:
          /* The result of max(A, 1x1) is always A. */
@@ -1673,7 +1690,13 @@ radv_emit_fragment_shading_rate(struct radv_cmd_buffer *cmd_buffer)
    /* VERTEX_RATE_COMBINER_MODE controls the combiner mode between the
     * draw rate and the vertex rate.
     */
-   pa_cl_vrs_cntl |= S_028848_VERTEX_RATE_COMBINER_MODE(vertex_comb_mode);
+   if (cmd_buffer->state.mesh_shading) {
+      pa_cl_vrs_cntl |= S_028848_VERTEX_RATE_COMBINER_MODE(V_028848_VRS_COMB_MODE_PASSTHRU) |
+                        S_028848_PRIMITIVE_RATE_COMBINER_MODE(pipeline_comb_mode);
+   } else {
+      pa_cl_vrs_cntl |= S_028848_VERTEX_RATE_COMBINER_MODE(pipeline_comb_mode) |
+                        S_028848_PRIMITIVE_RATE_COMBINER_MODE(V_028848_VRS_COMB_MODE_PASSTHRU);
+   }
 
    /* HTILE_RATE_COMBINER_MODE controls the combiner mode between the primitive rate and the HTILE
     * rate.
@@ -3006,6 +3029,9 @@ radv_emit_vertex_input(struct radv_cmd_buffer *cmd_buffer, bool pipeline_is_dirt
    emit_prolog_inputs(cmd_buffer, vs_shader, nontrivial_divisors, pipeline_is_dirty);
 
    cmd_buffer->state.emitted_vs_prolog = prolog;
+
+   if (unlikely(cmd_buffer->device->trace_bo))
+      radv_save_vs_prolog(cmd_buffer, prolog);
 }
 
 static void
@@ -5045,7 +5071,13 @@ radv_CmdBindPipeline(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipeline
       if (!pipeline)
          break;
 
-      cmd_buffer->state.mesh_shading = radv_pipeline_has_mesh(pipeline);
+      bool mesh_shading = radv_pipeline_has_mesh(pipeline);
+      if (mesh_shading != cmd_buffer->state.mesh_shading) {
+         /* Re-emit VRS state because the combiner is different (vertex vs primitive). */
+         cmd_buffer->state.dirty |= RADV_CMD_DIRTY_DYNAMIC_FRAGMENT_SHADING_RATE;
+      }
+
+      cmd_buffer->state.mesh_shading = mesh_shading;
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_PIPELINE | RADV_CMD_DIRTY_DYNAMIC_VERTEX_INPUT;
       cmd_buffer->push_constant_stages |= pipeline->active_stages;
 

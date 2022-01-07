@@ -671,7 +671,7 @@ bi_reads_t(bi_instr *ins, unsigned src)
 
         /* Staging register reads may happen before the succeeding register
          * block encodes a write, so effectively there is no passthrough */
-        if (src == 0 && bi_opcode_props[ins->op].sr_read)
+        if (bi_is_staging_src(ins, src))
                 return false;
 
         /* Bifrost cores newer than Mali G71 have restrictions on swizzles on
@@ -823,7 +823,7 @@ bi_tuple_is_new_src(bi_instr *instr, struct bi_reg_state *reg, unsigned src_idx)
                 return false;
 
         /* Staging register reads bypass the usual register file mechanism */
-        if (src_idx == 0 && bi_opcode_props[instr->op].sr_read)
+        if (bi_is_staging_src(instr, src_idx))
                 return false;
 
         /* If a source is already read in the tuple, it is already counted */
@@ -1199,21 +1199,21 @@ bi_take_instr(bi_context *ctx, struct bi_worklist st,
 }
 
 /* Variant of bi_rewrite_index_src_single that uses word-equivalence, rewriting
- * to a passthrough register. If except_zero is true, the zeroth (first) source
- * is skipped, so staging register reads are not accidentally encoded as
+ * to a passthrough register. If except_sr is true, the staging sources are
+ * skipped, so staging register reads are not accidentally encoded as
  * passthrough (which is impossible) */
 
 static void
 bi_use_passthrough(bi_instr *ins, bi_index old,
                 enum bifrost_packed_src new,
-                bool except_zero)
+                bool except_sr)
 {
         /* Optional for convenience */
         if (!ins || bi_is_null(old))
                 return;
 
         bi_foreach_src(ins, i) {
-                if (i == 0 && except_zero)
+                if ((i == 0 || i == 4) && except_sr)
                         continue;
 
                 if (bi_is_word_equiv(ins->src[i], old)) {
@@ -1863,7 +1863,7 @@ bi_check_fau_src(bi_instr *ins, unsigned s, uint32_t *constants, unsigned *cword
         bi_index src = ins->src[s];
 
         /* Staging registers can't have FAU accesses */
-        if (s == 0 && bi_opcode_props[ins->op].sr_read)
+        if (bi_is_staging_src(ins, s))
                 return (src.type != BI_INDEX_CONSTANT) && (src.type != BI_INDEX_FAU);
 
         if (src.type == BI_INDEX_CONSTANT) {
