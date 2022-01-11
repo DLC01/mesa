@@ -886,7 +886,9 @@ blorp_emit_ps_config(struct blorp_batch *batch,
        *
        * In Gfx8 the format is U8-2 whereas in Gfx9+ it is U9-1.
        */
-      if (GFX_VER >= 9)
+      if (GFX_VERx10 >= 125)
+         ps.MaximumNumberofThreadsPerPSD = 96 - 1;
+      else if (GFX_VER >= 9)
          ps.MaximumNumberofThreadsPerPSD = 64 - 1;
       else
          ps.MaximumNumberofThreadsPerPSD = 64 - 2;
@@ -1623,7 +1625,7 @@ blorp_setup_binding_table(struct blorp_batch *batch,
       }
    }
 
-#if GFX_VER >= 7
+#if GFX_VER >= 7 && GFX_VER < 12
    if (has_indirect_clear_color) {
       /* Updating a surface state object may require that the state cache be
        * invalidated. From the SKL PRM, Shared Functions -> State -> State
@@ -1633,6 +1635,12 @@ blorp_setup_binding_table(struct blorp_batch *batch,
        *    the Binding Table Pointer (BTP) and Binding Table Index (BTI) is
        *    modified [...], the L1 state cache must be invalidated to ensure
        *    the new surface or sampler state is fetched from system memory.
+       *
+       * XXX - Investigate why exactly this invalidation is necessary to
+       *       avoid Vulkan regressions on ICL.  It's possible that the
+       *       MI_ATOMIC used to update the clear color isn't correctly
+       *       ordered with the pre-existing invalidation in
+       *       blorp_update_clear_color().
        */
       blorp_emit(batch, GENX(PIPE_CONTROL), pipe) {
          pipe.StateCacheInvalidationEnable = true;
@@ -1754,6 +1762,8 @@ blorp_emit_depth_stencil_config(struct blorp_batch *batch,
     * post-sync = store dword operation would be required.( w/a is to
     * have an additional pipe control after the stencil state whenever
     * the surface state bits of this state is changing).
+    *
+    * This also seems sufficient to handle Wa_14014148106.
     */
    blorp_emit(batch, GENX(PIPE_CONTROL), pc) {
       pc.PostSyncOperation = WriteImmediateData;

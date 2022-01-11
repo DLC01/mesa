@@ -509,9 +509,16 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 0xFFFFFFFF;
    case PIPE_CAP_ACCELERATED:
       return 1;
-   case PIPE_CAP_VIDEO_MEMORY:
-      DBG("FINISHME: The value returned is incorrect\n");
-      return 10;
+
+   case PIPE_CAP_VIDEO_MEMORY: {
+      uint64_t system_memory;
+
+      if (!os_get_total_physical_memory(&system_memory))
+         return 0;
+
+      return (int)(system_memory >> 20);
+   }
+
    case PIPE_CAP_UMA:
       return 1;
    case PIPE_CAP_MEMOBJ:
@@ -724,6 +731,8 @@ fd_get_compute_param(struct pipe_screen *pscreen, enum pipe_shader_ir ir_type,
    if (!has_compute(screen))
       return 0;
 
+   struct ir3_compiler *compiler = screen->compiler;
+
 #define RET(x)                                                                 \
    do {                                                                        \
       if (ret)                                                                 \
@@ -780,7 +789,7 @@ fd_get_compute_param(struct pipe_screen *pscreen, enum pipe_shader_ir ir_type,
       RET((uint32_t[]){32}); // TODO
 
    case PIPE_COMPUTE_CAP_MAX_VARIABLE_THREADS_PER_BLOCK:
-      RET((uint64_t[]){1024}); // TODO
+      RET((uint64_t[]){ compiler->max_variable_workgroup_size });
    }
 
    return 0;

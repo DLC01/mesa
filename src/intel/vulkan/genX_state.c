@@ -31,49 +31,11 @@
 
 #include "common/intel_aux_map.h"
 #include "common/intel_sample_positions.h"
+#include "common/intel_pixel_hash.h"
 #include "genxml/gen_macros.h"
 #include "genxml/genX_pack.h"
 
 #include "vk_util.h"
-
-/**
- * Compute an \p n x \p m pixel hashing table usable as slice, subslice or
- * pixel pipe hashing table.  The resulting table is the cyclic repetition of
- * a fixed pattern with periodicity equal to \p period.
- *
- * If \p index is specified to be equal to \p period, a 2-way hashing table
- * will be generated such that indices 0 and 1 are returned for the following
- * fractions of entries respectively:
- *
- *   p_0 = ceil(period / 2) / period
- *   p_1 = floor(period / 2) / period
- *
- * If \p index is even and less than \p period, a 3-way hashing table will be
- * generated such that indices 0, 1 and 2 are returned for the following
- * fractions of entries:
- *
- *   p_0 = (ceil(period / 2) - 1) / period
- *   p_1 = floor(period / 2) / period
- *   p_2 = 1 / period
- *
- * The equations above apply if \p flip is equal to 0, if it is equal to 1 p_0
- * and p_1 will be swapped for the result.  Note that in the context of pixel
- * pipe hashing this can be always 0 on Gfx12 platforms, since the hardware
- * transparently remaps logical indices found on the table to physical pixel
- * pipe indices from the highest to lowest EU count.
- */
-UNUSED static void
-calculate_pixel_hashing_table(unsigned n, unsigned m,
-                              unsigned period, unsigned index, bool flip,
-                              uint32_t *p)
-{
-   for (unsigned i = 0; i < n; i++) {
-      for (unsigned j = 0; j < m; j++) {
-         const unsigned k = (i + j) % period;
-         p[j + m * i] = (k == index ? 2 : (k & 1) ^ flip);
-      }
-   }
-}
 
 static void
 genX(emit_slice_hashing_state)(struct anv_device *device,
@@ -95,7 +57,7 @@ genX(emit_slice_hashing_state)(struct anv_device *device,
       const bool flip = device->info.ppipe_subslices[0] <
                      device->info.ppipe_subslices[1];
       struct GENX(SLICE_HASH_TABLE) table;
-      calculate_pixel_hashing_table(16, 16, 3, 3, flip, table.Entry[0]);
+      intel_compute_pixel_hash_table_3way(16, 16, 3, 3, flip, table.Entry[0]);
 
       GENX(SLICE_HASH_TABLE_pack)(NULL, device->slice_hash.map, &table);
    }
@@ -134,16 +96,16 @@ genX(emit_slice_hashing_state)(struct anv_device *device,
       p.SliceHashControl[0] = TABLE_0;
 
       if (ppipes_of[2] == 2 && ppipes_of[0] == 1)
-         calculate_pixel_hashing_table(8, 16, 2, 2, 0, p.TwoWayTableEntry[0]);
+         intel_compute_pixel_hash_table_3way(8, 16, 2, 2, 0, p.TwoWayTableEntry[0]);
       else if (ppipes_of[2] == 1 && ppipes_of[1] == 1 && ppipes_of[0] == 1)
-         calculate_pixel_hashing_table(8, 16, 3, 3, 0, p.TwoWayTableEntry[0]);
+         intel_compute_pixel_hash_table_3way(8, 16, 3, 3, 0, p.TwoWayTableEntry[0]);
 
       if (ppipes_of[2] == 2 && ppipes_of[1] == 1)
-         calculate_pixel_hashing_table(8, 16, 5, 4, 0, p.ThreeWayTableEntry[0]);
+         intel_compute_pixel_hash_table_3way(8, 16, 5, 4, 0, p.ThreeWayTableEntry[0]);
       else if (ppipes_of[2] == 2 && ppipes_of[0] == 1)
-         calculate_pixel_hashing_table(8, 16, 2, 2, 0, p.ThreeWayTableEntry[0]);
+         intel_compute_pixel_hash_table_3way(8, 16, 2, 2, 0, p.ThreeWayTableEntry[0]);
       else if (ppipes_of[2] == 1 && ppipes_of[1] == 1 && ppipes_of[0] == 1)
-         calculate_pixel_hashing_table(8, 16, 3, 3, 0, p.ThreeWayTableEntry[0]);
+         intel_compute_pixel_hash_table_3way(8, 16, 3, 3, 0, p.ThreeWayTableEntry[0]);
       else
          unreachable("Illegal fusing.");
    }
@@ -152,6 +114,47 @@ genX(emit_slice_hashing_state)(struct anv_device *device,
       p.SubsliceHashingTableEnable = true;
       p.SubsliceHashingTableEnableMask = true;
    }
+#elif GFX_VERx10 == 125
+   uint32_t ppipe_mask = 0;
+   for (unsigned p = 0; p < ARRAY_SIZE(device->info.ppipe_subslices); p++) {
+      if (device->info.ppipe_subslices[p])
+         ppipe_mask |= (1u << p);
+   }
+   assert(ppipe_mask);
+
+   if (!device->slice_hash.alloc_size) {
+      unsigned size = GENX(SLICE_HASH_TABLE_length) * 4;
+      device->slice_hash =
+         anv_state_pool_alloc(&device->dynamic_state_pool, size, 64);
+
+      struct GENX(SLICE_HASH_TABLE) table;
+
+      /* Note that the hardware expects an array with 7 tables, each
+       * table is intended to specify the pixel pipe hashing behavior
+       * for every possible slice count between 2 and 8, however that
+       * doesn't actually work, among other reasons due to hardware
+       * bugs that will cause the GPU to erroneously access the table
+       * at the wrong index in some cases, so in practice all 7 tables
+       * need to be initialized to the same value.
+       */
+      for (unsigned i = 0; i < 7; i++)
+         intel_compute_pixel_hash_table_nway(16, 16, ppipe_mask, table.Entry[i][0]);
+
+      GENX(SLICE_HASH_TABLE_pack)(NULL, device->slice_hash.map, &table);
+   }
+
+   anv_batch_emit(batch, GENX(3DSTATE_SLICE_TABLE_STATE_POINTERS), ptr) {
+      ptr.SliceHashStatePointerValid = true;
+      ptr.SliceHashTableStatePointer = device->slice_hash.offset;
+   }
+
+   anv_batch_emit(batch, GENX(3DSTATE_3D_MODE), mode) {
+      mode.SliceHashingTableEnable = true;
+      mode.SliceHashingTableEnableMask = true;
+      mode.CrossSliceHashingMode = (util_bitcount(ppipe_mask) > 1 ?
+				    hashing32x32 : NormalMode);
+      mode.CrossSliceHashingModeMask = -1;
+   }
 #endif
 }
 
@@ -159,11 +162,12 @@ static VkResult
 init_render_queue_state(struct anv_queue *queue)
 {
    struct anv_device *device = queue->device;
-   struct anv_batch batch;
-
    uint32_t cmds[64];
-   batch.start = batch.next = cmds;
-   batch.end = (void *) cmds + sizeof(cmds);
+   struct anv_batch batch = {
+      .start = cmds,
+      .next = cmds,
+      .end = (void *) cmds + sizeof(cmds),
+   };
 
    anv_batch_emit(&batch, GENX(PIPELINE_SELECT), ps) {
 #if GFX_VER >= 9

@@ -1201,10 +1201,12 @@
     <field name="Component Override W" start="15" end="15" type="bool"/>
   </struct>
 
-  <struct name="SLICE_HASH_TABLE" length="32">
-    <group count="16" start="0" size="64">
-      <group count="16" start="0" size="4">
-        <field name="Entry" start="0" end="3" type="uint"/>
+  <struct name="SLICE_HASH_TABLE" length="224">
+    <group count="7" start="0" size="1024">
+      <group count="16" start="0" size="64">
+        <group count="16" start="0" size="4">
+          <field name="Entry" start="0" end="3" type="uint"/>
+        </group>
       </group>
     </group>
   </struct>
@@ -1370,7 +1372,7 @@
     <field name="3D Scoreboard Hashing Mode" start="36" end="36" type="bool"/>
     <field name="Subslice Hashing Table Enable" start="37" end="37" type="bool"/>
     <field name="Slice Hashing Table Enable" start="38" end="38" type="bool"/>
-    <field name="Cross Slice Hashing Mode Mask" start="48" end="49" type="uint"/>
+    <field name="Cross Slice Hashing Mode Mask" start="48" end="49" type="int"/>
     <field name="3D Scoreboard Hashing Mode Mask" start="52" end="52" type="bool"/>
     <field name="Subslice Hashing Table Enable Mask" start="53" end="53" type="bool"/>
     <field name="Slice Hashing Table Enable Mask" start="54" end="54" type="bool"/>

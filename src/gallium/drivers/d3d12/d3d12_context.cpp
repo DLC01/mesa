@@ -77,6 +77,7 @@ d3d12_context_destroy(struct pipe_context *pctx)
    slab_destroy_child(&ctx->transfer_pool_unsync);
    d3d12_gs_variant_cache_destroy(ctx);
    d3d12_gfx_pipeline_state_cache_destroy(ctx);
+   d3d12_compute_pipeline_state_cache_destroy(ctx);
    d3d12_root_signature_cache_destroy(ctx);
 
    u_suballocator_destroy(&ctx->query_allocator);
@@ -695,7 +696,6 @@ d3d12_bind_sampler_states(struct pipe_context *pctx,
                           void **samplers)
 {
    struct d3d12_context *ctx = d3d12_context(pctx);
-   bool shader_state_dirty = false;
 
 #define STATIC_ASSERT_PIPE_EQUAL_COMP_FUNC(X) \
    static_assert((enum compare_func)PIPE_FUNC_##X == COMPARE_FUNC_##X, #X " needs switch case");
@@ -715,11 +715,6 @@ d3d12_bind_sampler_states(struct pipe_context *pctx,
       ctx->samplers[shader][start_slot + i] = sampler;
       dxil_wrap_sampler_state &wrap = ctx->tex_wrap_states[shader][start_slot + i];
       if (sampler) {
-         shader_state_dirty |= wrap.wrap[0] != sampler->wrap_s ||
-                               wrap.wrap[1] != sampler->wrap_t ||
-                               wrap.wrap[2] != sampler->wrap_r;
-         shader_state_dirty |= !!memcmp(wrap.border_color, sampler->border_color, 4 * sizeof(float));
-
          wrap.wrap[0] = sampler->wrap_s;
          wrap.wrap[1] = sampler->wrap_t;
          wrap.wrap[2] = sampler->wrap_r;
@@ -735,8 +730,6 @@ d3d12_bind_sampler_states(struct pipe_context *pctx,
 
    ctx->num_samplers[shader] = start_slot + num_samplers;
    ctx->shader_dirty[shader] |= D3D12_SHADER_DIRTY_SAMPLERS;
-   if (shader_state_dirty)
-      ctx->state_dirty |= D3D12_DIRTY_SHADER;
 }
 
 static void
@@ -1134,6 +1127,39 @@ d3d12_delete_gs_state(struct pipe_context *pctx, void *gs)
 {
    delete_shader(d3d12_context(pctx), PIPE_SHADER_GEOMETRY,
                  (struct d3d12_shader_selector *) gs);
+}
+
+static void *
+d3d12_create_compute_state(struct pipe_context *pctx,
+                           const struct pipe_compute_state *shader)
+{
+   return d3d12_create_compute_shader(d3d12_context(pctx), shader);
+}
+
+static void
+d3d12_bind_compute_state(struct pipe_context *pctx, void *css)
+{
+   d3d12_context(pctx)->compute_state = (struct d3d12_shader_selector *)css;
+}
+
+static void
+d3d12_delete_compute_state(struct pipe_context *pctx, void *cs)
+{
+   struct d3d12_context *ctx = d3d12_context(pctx);
+   struct d3d12_shader_selector *shader = (struct d3d12_shader_selector *)cs;
+   d3d12_compute_pipeline_state_cache_invalidate_shader(ctx, shader);
+
+   /* Make sure the pipeline state no longer reference the deleted shader */
+   struct d3d12_shader *iter = shader->first;
+   while (iter) {
+      if (ctx->compute_pipeline_state.stage == iter) {
+         ctx->compute_pipeline_state.stage = NULL;
+         break;
+      }
+      iter = iter->next_variant;
+   }
+
+   d3d12_shader_free(shader);
 }
 
 static bool
@@ -1592,7 +1618,7 @@ d3d12_set_shader_images(struct pipe_context *pctx,
          pipe_resource_reference(&slot->resource, NULL);
       }
 
-      enum pipe_format emulation_format = PIPE_FORMAT_NONE;
+      ctx->image_view_emulation_formats[shader][i] = PIPE_FORMAT_NONE;
       if (i < count && images && images[i].resource) {
          pipe_resource_reference(&slot->resource, images[i].resource);
          *slot = images[i];
@@ -1603,16 +1629,11 @@ d3d12_set_shader_images(struct pipe_context *pctx,
              d3d12_get_typeless_format(images[i].format) !=
              d3d12_get_typeless_format(images[i].resource->format)) {
             /* Can't use D3D casting, have to use shader lowering instead */
-            emulation_format =
+            ctx->image_view_emulation_formats[shader][i] =
                get_shader_image_emulation_format(images[i].resource->format);
          }
       } else
          memset(slot, 0, sizeof(*slot));
-
-      if (ctx->image_view_emulation_formats[shader][i] != emulation_format) {
-         ctx->image_view_emulation_formats[shader][i] = emulation_format;
-         ctx->state_dirty |= D3D12_DIRTY_SHADER;
-      }
    }
 
    if (images) {
@@ -2176,6 +2197,10 @@ d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.bind_gs_state = d3d12_bind_gs_state;
    ctx->base.delete_gs_state = d3d12_delete_gs_state;
 
+   ctx->base.create_compute_state = d3d12_create_compute_state;
+   ctx->base.bind_compute_state = d3d12_bind_compute_state;
+   ctx->base.delete_compute_state = d3d12_delete_compute_state;
+
    ctx->base.set_polygon_stipple = d3d12_set_polygon_stipple;
    ctx->base.set_vertex_buffers = d3d12_set_vertex_buffers;
    ctx->base.set_viewport_states = d3d12_set_viewport_states;
@@ -2200,6 +2225,7 @@ d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.clear_render_target = d3d12_clear_render_target;
    ctx->base.clear_depth_stencil = d3d12_clear_depth_stencil;
    ctx->base.draw_vbo = d3d12_draw_vbo;
+   ctx->base.launch_grid = d3d12_launch_grid;
    ctx->base.flush = d3d12_flush;
    ctx->base.flush_resource = d3d12_flush_resource;
 
@@ -2237,6 +2263,7 @@ d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    }
 
    d3d12_gfx_pipeline_state_cache_init(ctx);
+   d3d12_compute_pipeline_state_cache_init(ctx);
    d3d12_root_signature_cache_init(ctx);
    d3d12_gs_variant_cache_init(ctx);
 

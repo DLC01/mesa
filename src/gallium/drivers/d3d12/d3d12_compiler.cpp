@@ -174,6 +174,7 @@ compile_nir(struct d3d12_context *ctx, struct d3d12_shader_selector *sel,
    NIR_PASS_V(nir, d3d12_lower_state_vars, shader);
    NIR_PASS_V(nir, dxil_nir_lower_bool_input);
    NIR_PASS_V(nir, dxil_nir_lower_loads_stores_to_dxil);
+   NIR_PASS_V(nir, dxil_nir_lower_atomics_to_dxil);
 
    struct nir_to_dxil_options opts = {};
    opts.interpolate_at_vertex = screen->have_load_at_vertex;
@@ -243,7 +244,6 @@ compile_nir(struct d3d12_context *ctx, struct d3d12_shader_selector *sel,
 
 struct d3d12_selection_context {
    struct d3d12_context *ctx;
-   const struct pipe_draw_info *dinfo;
    bool needs_point_sprite_lowering;
    bool needs_vertex_reordering;
    unsigned provoking_vertex;
@@ -253,6 +253,7 @@ struct d3d12_selection_context {
    bool manual_depth_range;
    unsigned missing_dual_src_outputs;
    unsigned frag_result_color_lowering;
+   const unsigned *variable_workgroup_size;
 };
 
 static unsigned
@@ -405,7 +406,7 @@ cull_mode_lowered(struct d3d12_context *ctx, unsigned fill_mode)
 }
 
 static unsigned
-get_provoking_vertex(struct d3d12_selection_context *sel_ctx, bool *alternate)
+get_provoking_vertex(struct d3d12_selection_context *sel_ctx, bool *alternate, const struct pipe_draw_info *dinfo)
 {
    struct d3d12_shader_selector *vs = sel_ctx->ctx->gfx_stages[PIPE_SHADER_VERTEX];
    struct d3d12_shader_selector *gs = sel_ctx->ctx->gfx_stages[PIPE_SHADER_GEOMETRY];
@@ -422,7 +423,7 @@ get_provoking_vertex(struct d3d12_selection_context *sel_ctx, bool *alternate)
       mode = (enum pipe_prim_type)last_vertex_stage->current->nir->info.gs.output_primitive;
       break;
    case PIPE_SHADER_VERTEX:
-      mode = sel_ctx->dinfo ? (enum pipe_prim_type)sel_ctx->dinfo->mode : PIPE_PRIM_TRIANGLES;
+      mode = (enum pipe_prim_type)dinfo->mode;
       break;
    default:
       unreachable("Tesselation shaders are not supported");
@@ -454,13 +455,13 @@ has_flat_varyings(struct d3d12_context *ctx)
 }
 
 static bool
-needs_vertex_reordering(struct d3d12_selection_context *sel_ctx)
+needs_vertex_reordering(struct d3d12_selection_context *sel_ctx, const struct pipe_draw_info *dinfo)
 {
    struct d3d12_context *ctx = sel_ctx->ctx;
    bool flat = has_flat_varyings(ctx);
    bool xfb = ctx->gfx_pipeline_state.num_so_targets > 0;
 
-   if (fill_mode_lowered(ctx, sel_ctx->dinfo) != PIPE_POLYGON_MODE_FILL)
+   if (fill_mode_lowered(ctx, dinfo) != PIPE_POLYGON_MODE_FILL)
       return false;
 
    /* TODO add support for line primitives */
@@ -619,6 +620,10 @@ d3d12_compare_shader_keys(const d3d12_shader_key *expect, const d3d12_shader_key
           expect->fs.polygon_stipple != have->fs.polygon_stipple ||
           expect->fs.cast_to_uint != have->fs.cast_to_uint ||
           expect->fs.cast_to_int != have->fs.cast_to_int)
+         return false;
+   } else if (expect->stage == PIPE_SHADER_COMPUTE) {
+      if (memcmp(expect->cs.workgroup_size, have->cs.workgroup_size,
+                 sizeof(have->cs.workgroup_size)))
          return false;
    }
 
@@ -812,6 +817,10 @@ d3d12_fill_shader_key(struct d3d12_selection_context *sel_ctx,
       key->fs.remap_front_facing = 1;
    }
 
+   if (stage == PIPE_SHADER_COMPUTE && sel_ctx->variable_workgroup_size) {
+      memcpy(key->cs.workgroup_size, sel_ctx->variable_workgroup_size, sizeof(key->cs.workgroup_size));
+   }
+
    key->n_images = sel_ctx->ctx->num_image_views[stage];
    for (int i = 0; i < key->n_images; ++i) {
       key->image_format_conversion[i].emulated_format = sel_ctx->ctx->image_view_emulation_formats[stage][i];
@@ -903,6 +912,12 @@ select_shader_variant(struct d3d12_selection_context *sel_ctx, d3d12_shader_sele
 
    if (key.n_images)
       NIR_PASS_V(new_nir_variant, d3d12_lower_image_casts, key.image_format_conversion);
+
+   if (sel->workgroup_size_variable) {
+      new_nir_variant->info.workgroup_size[0] = key.cs.workgroup_size[0];
+      new_nir_variant->info.workgroup_size[1] = key.cs.workgroup_size[1];
+      new_nir_variant->info.workgroup_size[2] = key.cs.workgroup_size[2];
+   }
 
    {
       struct nir_lower_tex_options tex_options = { };
@@ -1048,62 +1063,18 @@ update_so_info(struct pipe_stream_output_info *so_info,
    return so_outputs;
 }
 
-struct d3d12_shader_selector *
-d3d12_create_shader(struct d3d12_context *ctx,
-                    pipe_shader_type stage,
-                    const struct pipe_shader_state *shader)
+static struct d3d12_shader_selector *
+d3d12_create_shader_impl(struct d3d12_context *ctx,
+                         struct d3d12_shader_selector *sel,
+                         struct nir_shader *nir,
+                         struct d3d12_shader_selector *prev,
+                         struct d3d12_shader_selector *next)
 {
-   struct d3d12_shader_selector *sel = rzalloc(nullptr, d3d12_shader_selector);
-   sel->stage = stage;
-
-   struct nir_shader *nir = NULL;
-
-   if (shader->type == PIPE_SHADER_IR_NIR) {
-      nir = (nir_shader *)shader->ir.nir;
-   } else {
-      assert(shader->type == PIPE_SHADER_IR_TGSI);
-      nir = tgsi_to_nir(shader->tokens, ctx->base.screen, false);
-   }
-
-   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
-
    unsigned tex_scan_result = scan_texture_use(nir);
    sel->samples_int_textures = (tex_scan_result & TEX_SAMPLE_INTEGER_TEXTURE) != 0;
    sel->compare_with_lod_bias_grad = (tex_scan_result & TEX_CMP_WITH_LOD_BIAS_GRAD) != 0;
-
-   memcpy(&sel->so_info, &shader->stream_output, sizeof(sel->so_info));
-   update_so_info(&sel->so_info, nir->info.outputs_written);
-
-   assert(nir != NULL);
-   d3d12_shader_selector *prev = get_prev_shader(ctx, sel->stage);
-   d3d12_shader_selector *next = get_next_shader(ctx, sel->stage);
-
-   uint64_t in_mask = nir->info.stage == MESA_SHADER_VERTEX ?
-                         0 : VARYING_BIT_PRIMITIVE_ID;
-
-   uint64_t out_mask = nir->info.stage == MESA_SHADER_FRAGMENT ?
-                          (1ull << FRAG_RESULT_STENCIL) :
-                          VARYING_BIT_PRIMITIVE_ID;
-
-   d3d12_fix_io_uint_type(nir, in_mask, out_mask);
-   NIR_PASS_V(nir, dxil_nir_split_clip_cull_distance);
-
-   if (nir->info.stage != MESA_SHADER_VERTEX)
-      nir->info.inputs_read =
-            dxil_reassign_driver_locations(nir, nir_var_shader_in,
-                                            prev ? prev->current->nir->info.outputs_written : 0);
-   else
-      nir->info.inputs_read = dxil_sort_by_driver_location(nir, nir_var_shader_in);
-
-   if (nir->info.stage != MESA_SHADER_FRAGMENT) {
-      nir->info.outputs_written =
-            dxil_reassign_driver_locations(nir, nir_var_shader_out,
-                                            next ? next->current->nir->info.inputs_read : 0);
-   } else {
-      NIR_PASS_V(nir, nir_lower_fragcoord_wtrans);
-      dxil_sort_ps_outputs(nir);
-   }
-
+   sel->workgroup_size_variable = nir->info.workgroup_size_variable;
+   
    /* Integer cube maps are not supported in DirectX because sampling is not supported
     * on integer textures and TextureLoad is not supported for cube maps, so we have to
     * lower integer cube maps to be handled like 2D textures arrays*/
@@ -1141,6 +1112,83 @@ d3d12_create_shader(struct d3d12_context *ctx,
    return sel;
 }
 
+struct d3d12_shader_selector *
+d3d12_create_shader(struct d3d12_context *ctx,
+                    pipe_shader_type stage,
+                    const struct pipe_shader_state *shader)
+{
+   struct d3d12_shader_selector *sel = rzalloc(nullptr, d3d12_shader_selector);
+   sel->stage = stage;
+
+   struct nir_shader *nir = NULL;
+
+   if (shader->type == PIPE_SHADER_IR_NIR) {
+      nir = (nir_shader *)shader->ir.nir;
+   } else {
+      assert(shader->type == PIPE_SHADER_IR_TGSI);
+      nir = tgsi_to_nir(shader->tokens, ctx->base.screen, false);
+   }
+
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+   memcpy(&sel->so_info, &shader->stream_output, sizeof(sel->so_info));
+   update_so_info(&sel->so_info, nir->info.outputs_written);
+
+   assert(nir != NULL);
+   d3d12_shader_selector *prev = get_prev_shader(ctx, sel->stage);
+   d3d12_shader_selector *next = get_next_shader(ctx, sel->stage);
+
+   uint64_t in_mask = nir->info.stage == MESA_SHADER_VERTEX ?
+                         0 : VARYING_BIT_PRIMITIVE_ID;
+
+   uint64_t out_mask = nir->info.stage == MESA_SHADER_FRAGMENT ?
+                          (1ull << FRAG_RESULT_STENCIL) :
+                          VARYING_BIT_PRIMITIVE_ID;
+
+   d3d12_fix_io_uint_type(nir, in_mask, out_mask);
+   NIR_PASS_V(nir, dxil_nir_split_clip_cull_distance);
+
+   if (nir->info.stage != MESA_SHADER_VERTEX)
+      nir->info.inputs_read =
+            dxil_reassign_driver_locations(nir, nir_var_shader_in,
+                                            prev ? prev->current->nir->info.outputs_written : 0);
+   else
+      nir->info.inputs_read = dxil_sort_by_driver_location(nir, nir_var_shader_in);
+
+   if (nir->info.stage != MESA_SHADER_FRAGMENT) {
+      nir->info.outputs_written =
+            dxil_reassign_driver_locations(nir, nir_var_shader_out,
+                                            next ? next->current->nir->info.inputs_read : 0);
+   } else {
+      NIR_PASS_V(nir, nir_lower_fragcoord_wtrans);
+      dxil_sort_ps_outputs(nir);
+   }
+
+   return d3d12_create_shader_impl(ctx, sel, nir, prev, next);
+}
+
+struct d3d12_shader_selector *
+d3d12_create_compute_shader(struct d3d12_context *ctx,
+                            const struct pipe_compute_state *shader)
+{
+   struct d3d12_shader_selector *sel = rzalloc(nullptr, d3d12_shader_selector);
+   sel->stage = PIPE_SHADER_COMPUTE;
+
+   struct nir_shader *nir = NULL;
+
+   if (shader->ir_type == PIPE_SHADER_IR_NIR) {
+      nir = (nir_shader *)shader->prog;
+   } else {
+      assert(shader->ir_type == PIPE_SHADER_IR_TGSI);
+      nir = tgsi_to_nir(shader->prog, ctx->base.screen, false);
+   }
+
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+
+   NIR_PASS_V(nir, d3d12_lower_compute_state_vars);
+
+   return d3d12_create_shader_impl(ctx, sel, nir, nullptr, nullptr);
+}
+
 void
 d3d12_select_shader_variants(struct d3d12_context *ctx, const struct pipe_draw_info *dinfo)
 {
@@ -1148,12 +1196,11 @@ d3d12_select_shader_variants(struct d3d12_context *ctx, const struct pipe_draw_i
    struct d3d12_selection_context sel_ctx;
 
    sel_ctx.ctx = ctx;
-   sel_ctx.dinfo = dinfo;
    sel_ctx.needs_point_sprite_lowering = needs_point_sprite_lowering(ctx, dinfo);
    sel_ctx.fill_mode_lowered = fill_mode_lowered(ctx, dinfo);
    sel_ctx.cull_mode_lowered = cull_mode_lowered(ctx, sel_ctx.fill_mode_lowered);
-   sel_ctx.provoking_vertex = get_provoking_vertex(&sel_ctx, &sel_ctx.alternate_tri);
-   sel_ctx.needs_vertex_reordering = needs_vertex_reordering(&sel_ctx);
+   sel_ctx.provoking_vertex = get_provoking_vertex(&sel_ctx, &sel_ctx.alternate_tri, dinfo);
+   sel_ctx.needs_vertex_reordering = needs_vertex_reordering(&sel_ctx, dinfo);
    sel_ctx.missing_dual_src_outputs = missing_dual_src_outputs(ctx);
    sel_ctx.frag_result_color_lowering = frag_result_color_lowering(ctx);
    sel_ctx.manual_depth_range = manual_depth_range(ctx);
@@ -1170,6 +1217,26 @@ d3d12_select_shader_variants(struct d3d12_context *ctx, const struct pipe_draw_i
 
       select_shader_variant(&sel_ctx, sel, prev, next);
    }
+}
+
+static const unsigned *
+workgroup_size_variable(struct d3d12_context *ctx,
+                        const struct pipe_grid_info *info)
+{
+   if (ctx->compute_state->workgroup_size_variable)
+      return info->block;
+   return nullptr;
+}
+
+void
+d3d12_select_compute_shader_variants(struct d3d12_context *ctx, const struct pipe_grid_info *info)
+{
+   struct d3d12_selection_context sel_ctx = {};
+
+   sel_ctx.ctx = ctx;
+   sel_ctx.variable_workgroup_size = workgroup_size_variable(ctx, info);
+
+   select_shader_variant(&sel_ctx, ctx->compute_state, nullptr, nullptr);
 }
 
 void

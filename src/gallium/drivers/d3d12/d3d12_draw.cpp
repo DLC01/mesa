@@ -338,11 +338,11 @@ fill_image_descriptors(struct d3d12_context *ctx,
 }
 
 static unsigned
-fill_state_vars(struct d3d12_context *ctx,
-                const struct pipe_draw_info *dinfo,
-                const struct pipe_draw_start_count_bias *draw,
-                struct d3d12_shader *shader,
-                uint32_t *values)
+fill_graphics_state_vars(struct d3d12_context *ctx,
+                         const struct pipe_draw_info *dinfo,
+                         const struct pipe_draw_start_count_bias *draw,
+                         struct d3d12_shader *shader,
+                         uint32_t *values)
 {
    unsigned size = 0;
 
@@ -378,14 +378,41 @@ fill_state_vars(struct d3d12_context *ctx,
    return size;
 }
 
+static unsigned
+fill_compute_state_vars(struct d3d12_context *ctx,
+                        const struct pipe_grid_info *info,
+                        struct d3d12_shader *shader,
+                        uint32_t *values)
+{
+   unsigned size = 0;
+
+   for (unsigned j = 0; j < shader->num_state_vars; ++j) {
+      uint32_t *ptr = values + size;
+
+      switch (shader->state_vars[j].var) {
+      case D3D12_STATE_VAR_NUM_WORKGROUPS:
+         ptr[0] = info->grid[0];
+         ptr[1] = info->grid[1];
+         ptr[2] = info->grid[2];
+         size += 4;
+         break;
+      default:
+         unreachable("unknown state variable");
+      }
+   }
+
+   return size;
+}
+
 static bool
-check_descriptors_left(struct d3d12_context *ctx)
+check_descriptors_left(struct d3d12_context *ctx, bool compute)
 {
    struct d3d12_batch *batch = d3d12_current_batch(ctx);
    unsigned needed_descs = 0;
 
-   for (unsigned i = 0; i < D3D12_GFX_SHADER_STAGES; ++i) {
-      struct d3d12_shader_selector *shader = ctx->gfx_stages[i];
+   unsigned count = compute ? 1 : D3D12_GFX_SHADER_STAGES;
+   for (unsigned i = 0; i < count; ++i) {
+      struct d3d12_shader_selector *shader = compute ? ctx->compute_state : ctx->gfx_stages[i];
 
       if (!shader)
          continue;
@@ -400,8 +427,8 @@ check_descriptors_left(struct d3d12_context *ctx)
       return false;
 
    needed_descs = 0;
-   for (unsigned i = 0; i < D3D12_GFX_SHADER_STAGES; ++i) {
-      struct d3d12_shader_selector *shader = ctx->gfx_stages[i];
+   for (unsigned i = 0; i < count; ++i) {
+      struct d3d12_shader_selector *shader = compute ? ctx->compute_state : ctx->gfx_stages[i];
 
       if (!shader)
          continue;
@@ -417,6 +444,59 @@ check_descriptors_left(struct d3d12_context *ctx)
 
 #define MAX_DESCRIPTOR_TABLES (D3D12_GFX_SHADER_STAGES * 4)
 
+static void
+update_shader_stage_root_parameters(struct d3d12_context *ctx,
+                                    const struct d3d12_shader_selector *shader_sel,
+                                    unsigned &num_params,
+                                    unsigned &num_root_descriptors,
+                                    D3D12_GPU_DESCRIPTOR_HANDLE root_desc_tables[MAX_DESCRIPTOR_TABLES],
+                                    int root_desc_indices[MAX_DESCRIPTOR_TABLES])
+{
+   auto stage = shader_sel->stage;
+   struct d3d12_shader *shader = shader_sel->current;
+   uint64_t dirty = ctx->shader_dirty[stage];
+   assert(shader);
+
+   if (shader->num_cb_bindings > 0) {
+      if (dirty & D3D12_SHADER_DIRTY_CONSTBUF) {
+         assert(num_root_descriptors < MAX_DESCRIPTOR_TABLES);
+         root_desc_tables[num_root_descriptors] = fill_cbv_descriptors(ctx, shader, stage);
+         root_desc_indices[num_root_descriptors++] = num_params;
+      }
+      num_params++;
+   }
+   if (shader->end_srv_binding > 0) {
+      if (dirty & D3D12_SHADER_DIRTY_SAMPLER_VIEWS) {
+         assert(num_root_descriptors < MAX_DESCRIPTOR_TABLES);
+         root_desc_tables[num_root_descriptors] = fill_srv_descriptors(ctx, shader, stage);
+         root_desc_indices[num_root_descriptors++] = num_params;
+      }
+      num_params++;
+      if (dirty & D3D12_SHADER_DIRTY_SAMPLERS) {
+         assert(num_root_descriptors < MAX_DESCRIPTOR_TABLES);
+         root_desc_tables[num_root_descriptors] = fill_sampler_descriptors(ctx, shader_sel, stage);
+         root_desc_indices[num_root_descriptors++] = num_params;
+      }
+      num_params++;
+   }
+   if (shader->nir->info.num_ssbos > 0) {
+      if (dirty & D3D12_SHADER_DIRTY_SSBO) {
+         assert(num_root_descriptors < MAX_DESCRIPTOR_TABLES);
+         root_desc_tables[num_root_descriptors] = fill_ssbo_descriptors(ctx, shader, stage);
+         root_desc_indices[num_root_descriptors++] = num_params;
+      }
+      num_params++;
+   }
+   if (shader->nir->info.num_images > 0) {
+      if (dirty & D3D12_SHADER_DIRTY_IMAGE) {
+         assert(num_root_descriptors < MAX_DESCRIPTOR_TABLES);
+         root_desc_tables[num_root_descriptors] = fill_image_descriptors(ctx, shader, stage);
+         root_desc_indices[num_root_descriptors++] = num_params;
+      }
+      num_params++;
+   }
+}
+
 static unsigned
 update_graphics_root_parameters(struct d3d12_context *ctx,
                                 const struct pipe_draw_info *dinfo,
@@ -425,64 +505,46 @@ update_graphics_root_parameters(struct d3d12_context *ctx,
                                 int root_desc_indices[MAX_DESCRIPTOR_TABLES])
 {
    unsigned num_params = 0;
-   unsigned num_root_desciptors = 0;
+   unsigned num_root_descriptors = 0;
 
    for (unsigned i = 0; i < D3D12_GFX_SHADER_STAGES; ++i) {
-      if (!ctx->gfx_stages[i])
+      struct d3d12_shader_selector *shader_sel = ctx->gfx_stages[i];
+      if (!shader_sel)
          continue;
 
-      struct d3d12_shader_selector *shader_sel = ctx->gfx_stages[i];
-      struct d3d12_shader *shader = shader_sel->current;
-      uint64_t dirty = ctx->shader_dirty[i];
-      assert(shader);
-
-      if (shader->num_cb_bindings > 0) {
-         if (dirty & D3D12_SHADER_DIRTY_CONSTBUF) {
-            assert(num_root_desciptors < MAX_DESCRIPTOR_TABLES);
-            root_desc_tables[num_root_desciptors] = fill_cbv_descriptors(ctx, shader, i);
-            root_desc_indices[num_root_desciptors++] = num_params;
-         }
-         num_params++;
-      }
-      if (shader->end_srv_binding > 0) {
-         if (dirty & D3D12_SHADER_DIRTY_SAMPLER_VIEWS) {
-            assert(num_root_desciptors < MAX_DESCRIPTOR_TABLES);
-            root_desc_tables[num_root_desciptors] = fill_srv_descriptors(ctx, shader, i);
-            root_desc_indices[num_root_desciptors++] = num_params;
-         }
-         num_params++;
-         if (dirty & D3D12_SHADER_DIRTY_SAMPLERS) {
-            assert(num_root_desciptors < MAX_DESCRIPTOR_TABLES);
-            root_desc_tables[num_root_desciptors] = fill_sampler_descriptors(ctx, shader_sel, i);
-            root_desc_indices[num_root_desciptors++] = num_params;
-         }
-         num_params++;
-      }
+      update_shader_stage_root_parameters(ctx, shader_sel, num_params, num_root_descriptors, root_desc_tables, root_desc_indices);
       /* TODO Don't always update state vars */
-      if (shader->num_state_vars > 0) {
-         uint32_t constants[D3D12_MAX_STATE_VARS * 4];
-         unsigned size = fill_state_vars(ctx, dinfo, draw, shader, constants);
+      if (shader_sel->current->num_state_vars > 0) {
+         uint32_t constants[D3D12_MAX_GRAPHICS_STATE_VARS * 4];
+         unsigned size = fill_graphics_state_vars(ctx, dinfo, draw, shader_sel->current, constants);
          ctx->cmdlist->SetGraphicsRoot32BitConstants(num_params, size, constants, 0);
          num_params++;
       }
-      if (shader->nir->info.num_ssbos > 0) {
-         if (dirty & D3D12_SHADER_DIRTY_SSBO) {
-            assert(num_root_desciptors < MAX_DESCRIPTOR_TABLES);
-            root_desc_tables[num_root_desciptors] = fill_ssbo_descriptors(ctx, shader, i);
-            root_desc_indices[num_root_desciptors++] = num_params;
-         }
-         num_params++;
-      }
-      if (shader->nir->info.num_images > 0) {
-         if (dirty & D3D12_SHADER_DIRTY_IMAGE) {
-            assert(num_root_desciptors < MAX_DESCRIPTOR_TABLES);
-            root_desc_tables[num_root_desciptors] = fill_image_descriptors(ctx, shader, i);
-            root_desc_indices[num_root_desciptors++] = num_params;
-         }
+   }
+   return num_root_descriptors;
+}
+
+static unsigned
+update_compute_root_parameters(struct d3d12_context *ctx,
+                               const struct pipe_grid_info *info,
+                               D3D12_GPU_DESCRIPTOR_HANDLE root_desc_tables[MAX_DESCRIPTOR_TABLES],
+                               int root_desc_indices[MAX_DESCRIPTOR_TABLES])
+{
+   unsigned num_params = 0;
+   unsigned num_root_descriptors = 0;
+
+   struct d3d12_shader_selector *shader_sel = ctx->compute_state;
+   if (shader_sel) {
+      update_shader_stage_root_parameters(ctx, shader_sel, num_params, num_root_descriptors, root_desc_tables, root_desc_indices);
+      /* TODO Don't always update state vars */
+      if (shader_sel->current->num_state_vars > 0) {
+         uint32_t constants[D3D12_MAX_COMPUTE_STATE_VARS * 4];
+         unsigned size = fill_compute_state_vars(ctx, info, shader_sel->current, constants);
+         ctx->cmdlist->SetComputeRoot32BitConstants(num_params, size, constants, 0);
          num_params++;
       }
    }
-   return num_root_desciptors;
+   return num_root_descriptors;
 }
 
 static bool
@@ -752,7 +814,7 @@ d3d12_draw_vbo(struct pipe_context *pctx,
    }
 
    if (!ctx->gfx_pipeline_state.root_signature || ctx->state_dirty & D3D12_DIRTY_SHADER) {
-      ID3D12RootSignature *root_signature = d3d12_get_root_signature(ctx);
+      ID3D12RootSignature *root_signature = d3d12_get_root_signature(ctx, false);
       if (ctx->gfx_pipeline_state.root_signature != root_signature) {
          ctx->gfx_pipeline_state.root_signature = root_signature;
          ctx->state_dirty |= D3D12_DIRTY_ROOT_SIGNATURE;
@@ -761,14 +823,14 @@ d3d12_draw_vbo(struct pipe_context *pctx,
       }
    }
 
-   if (!ctx->current_pso || ctx->state_dirty & D3D12_DIRTY_PSO) {
-      ctx->current_pso = d3d12_get_gfx_pipeline_state(ctx);
-      assert(ctx->current_pso);
+   if (!ctx->current_gfx_pso || ctx->state_dirty & D3D12_DIRTY_GFX_PSO) {
+      ctx->current_gfx_pso = d3d12_get_gfx_pipeline_state(ctx);
+      assert(ctx->current_gfx_pso);
    }
 
    ctx->cmdlist_dirty |= ctx->state_dirty;
 
-   if (!check_descriptors_left(ctx))
+   if (!check_descriptors_left(ctx, false))
       d3d12_flush_cmdlist(ctx);
    batch = d3d12_current_batch(ctx);
 
@@ -777,15 +839,15 @@ d3d12_draw_vbo(struct pipe_context *pctx,
       ctx->cmdlist->SetGraphicsRootSignature(ctx->gfx_pipeline_state.root_signature);
    }
 
-   if (ctx->cmdlist_dirty & D3D12_DIRTY_PSO) {
-      assert(ctx->current_pso);
-      d3d12_batch_reference_object(batch, ctx->current_pso);
-      ctx->cmdlist->SetPipelineState(ctx->current_pso);
+   if (ctx->cmdlist_dirty & D3D12_DIRTY_GFX_PSO) {
+      assert(ctx->current_gfx_pso);
+      d3d12_batch_reference_object(batch, ctx->current_gfx_pso);
+      ctx->cmdlist->SetPipelineState(ctx->current_gfx_pso);
    }
 
    D3D12_GPU_DESCRIPTOR_HANDLE root_desc_tables[MAX_DESCRIPTOR_TABLES];
    int root_desc_indices[MAX_DESCRIPTOR_TABLES];
-   unsigned num_root_desciptors = update_graphics_root_parameters(ctx, dinfo, &draws[0], root_desc_tables, root_desc_indices);
+   unsigned num_root_descriptors = update_graphics_root_parameters(ctx, dinfo, &draws[0], root_desc_tables, root_desc_indices);
 
    bool need_zero_one_depth_range = d3d12_need_zero_one_depth_range(ctx);
    if (need_zero_one_depth_range != ctx->need_zero_one_depth_range) {
@@ -923,7 +985,7 @@ d3d12_draw_vbo(struct pipe_context *pctx,
 
    d3d12_apply_resource_states(ctx);
 
-   for (unsigned i = 0; i < num_root_desciptors; ++i)
+   for (unsigned i = 0; i < num_root_descriptors; ++i)
       ctx->cmdlist->SetGraphicsRootDescriptorTable(root_desc_indices[i], root_desc_tables[i]);
 
    if (dinfo->index_size > 0)
@@ -934,13 +996,14 @@ d3d12_draw_vbo(struct pipe_context *pctx,
       ctx->cmdlist->DrawInstanced(draws[0].count, dinfo->instance_count,
                                   draws[0].start, dinfo->start_instance);
 
-   ctx->state_dirty = 0;
+   ctx->state_dirty &= D3D12_DIRTY_COMPUTE_MASK;
    batch->pending_memory_barrier = false;
 
-   if (index_buffer)
-      ctx->cmdlist_dirty = 0;
-   else
-      ctx->cmdlist_dirty &= D3D12_DIRTY_INDEX_BUFFER;
+   ctx->cmdlist_dirty &= D3D12_DIRTY_COMPUTE_MASK |
+      (index_buffer ? 0 : D3D12_DIRTY_INDEX_BUFFER);
+
+   /* The next dispatch needs to reassert the compute PSO */
+   ctx->cmdlist_dirty |= D3D12_DIRTY_COMPUTE_SHADER;
 
    for (unsigned i = 0; i < D3D12_GFX_SHADER_STAGES; ++i)
       ctx->shader_dirty[i] = 0;
@@ -951,4 +1014,84 @@ d3d12_draw_vbo(struct pipe_context *pctx,
          d3d12_surface_update_post_draw(pctx, surface, conversion_modes[i]);
       }
    }
+}
+
+void
+d3d12_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
+{
+   struct d3d12_context *ctx = d3d12_context(pctx);
+   struct d3d12_batch *batch;
+
+   if (info->indirect) {
+      /* TODO: Use a compute shader to retrieve state vars if necessary, and do an actual indirect dispatch */
+      pipe_box box = { (int)info->indirect_offset, 0, 0, sizeof(info->grid), 1, 1 };
+      pipe_transfer *transfer = nullptr;
+      void *map = pctx->buffer_map(pctx, info->indirect, 0, PIPE_MAP_READ, &box, &transfer);
+      pipe_grid_info new_info = *info;
+      new_info.indirect = nullptr;
+      memcpy(new_info.grid, map, sizeof(new_info.grid));
+      pctx->buffer_unmap(pctx, transfer);
+
+      d3d12_launch_grid(pctx, &new_info);
+      return;
+   }
+
+   d3d12_select_compute_shader_variants(ctx, info);
+   d3d12_validate_queries(ctx);
+   struct d3d12_shader *shader = ctx->compute_state ? ctx->compute_state->current : NULL;
+   if (ctx->compute_pipeline_state.stage != shader) {
+      ctx->compute_pipeline_state.stage = shader;
+      ctx->state_dirty |= D3D12_DIRTY_COMPUTE_SHADER;
+   }
+
+   if (!ctx->compute_pipeline_state.root_signature || ctx->state_dirty & D3D12_DIRTY_COMPUTE_SHADER) {
+      ID3D12RootSignature *root_signature = d3d12_get_root_signature(ctx, true);
+      if (ctx->compute_pipeline_state.root_signature != root_signature) {
+         ctx->compute_pipeline_state.root_signature = root_signature;
+         ctx->state_dirty |= D3D12_DIRTY_COMPUTE_ROOT_SIGNATURE;
+         ctx->shader_dirty[PIPE_SHADER_COMPUTE] |= D3D12_SHADER_DIRTY_ALL;
+      }
+   }
+
+   if (!ctx->current_compute_pso || ctx->state_dirty & D3D12_DIRTY_COMPUTE_PSO) {
+      ctx->current_compute_pso = d3d12_get_compute_pipeline_state(ctx);
+      assert(ctx->current_compute_pso);
+   }
+
+   ctx->cmdlist_dirty |= ctx->state_dirty;
+
+   if (!check_descriptors_left(ctx, true))
+      d3d12_flush_cmdlist(ctx);
+   batch = d3d12_current_batch(ctx);
+
+   if (ctx->cmdlist_dirty & D3D12_DIRTY_COMPUTE_ROOT_SIGNATURE) {
+      d3d12_batch_reference_object(batch, ctx->compute_pipeline_state.root_signature);
+      ctx->cmdlist->SetComputeRootSignature(ctx->compute_pipeline_state.root_signature);
+   }
+
+   if (ctx->cmdlist_dirty & D3D12_DIRTY_COMPUTE_PSO) {
+      assert(ctx->current_compute_pso);
+      d3d12_batch_reference_object(batch, ctx->current_compute_pso);
+      ctx->cmdlist->SetPipelineState(ctx->current_compute_pso);
+   }
+
+   D3D12_GPU_DESCRIPTOR_HANDLE root_desc_tables[MAX_DESCRIPTOR_TABLES];
+   int root_desc_indices[MAX_DESCRIPTOR_TABLES];
+   unsigned num_root_descriptors = update_compute_root_parameters(ctx, info, root_desc_tables, root_desc_indices);
+
+   d3d12_apply_resource_states(ctx);
+
+   for (unsigned i = 0; i < num_root_descriptors; ++i)
+      ctx->cmdlist->SetComputeRootDescriptorTable(root_desc_indices[i], root_desc_tables[i]);
+
+   ctx->cmdlist->Dispatch(info->grid[0], info->grid[1], info->grid[2]);
+
+   ctx->state_dirty &= D3D12_DIRTY_GFX_MASK;
+   ctx->cmdlist_dirty &= D3D12_DIRTY_GFX_MASK;
+
+   /* The next draw needs to reassert the graphics PSO */
+   ctx->cmdlist_dirty |= D3D12_DIRTY_SHADER;
+   batch->pending_memory_barrier = false;
+
+   ctx->shader_dirty[PIPE_SHADER_COMPUTE] = 0;
 }
