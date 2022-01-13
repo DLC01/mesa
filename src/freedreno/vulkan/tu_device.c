@@ -1328,8 +1328,9 @@ tu_queue_init(struct tu_device *device,
       return result;
 
    queue->device = device;
-
-   list_inithead(&queue->queued_submits);
+#ifndef TU_USE_KGSL
+   queue->vk.driver_submit = tu_queue_submit;
+#endif
 
    int ret = tu_drm_submitqueue_new(device, 0, &queue->msm_queue_id);
    if (ret)
@@ -1569,10 +1570,13 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    device->instance = physical_device->instance;
    device->physical_device = physical_device;
    device->fd = physical_device->local_fd;
-   device->_lost = false;
 
    mtx_init(&device->bo_mutex, mtx_plain);
    pthread_mutex_init(&device->submit_mutex, NULL);
+
+#ifndef TU_USE_KGSL
+   vk_device_set_drm_fd(&device->vk, device->fd);
+#endif
 
    for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
       const VkDeviceQueueCreateInfo *queue_create =
@@ -1819,27 +1823,6 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 }
 
 VkResult
-_tu_device_set_lost(struct tu_device *device,
-                    const char *msg, ...)
-{
-   /* Set the flag indicating that waits should return in finite time even
-    * after device loss.
-    */
-   p_atomic_inc(&device->_lost);
-
-   /* TODO: Report the log message through VkDebugReportCallbackEXT instead */
-   va_list ap;
-   va_start(ap, msg);
-   mesa_loge_v(msg, ap);
-   va_end(ap);
-
-   if (env_var_as_boolean("TU_ABORT_ON_DEVICE_LOSS", false))
-      abort();
-
-   return VK_ERROR_DEVICE_LOST;
-}
-
-VkResult
 tu_get_scratch_bo(struct tu_device *dev, uint64_t size, struct tu_bo **bo)
 {
    unsigned size_log2 = MAX2(util_logbase2_ceil64(size), MIN_SCRATCH_BO_SIZE_LOG2);
@@ -1893,30 +1876,18 @@ tu_EnumerateInstanceLayerProperties(uint32_t *pPropertyCount,
    return VK_SUCCESS;
 }
 
+/* Only used for kgsl since drm started using common implementation */
+#ifdef TU_USE_KGSL
 VKAPI_ATTR VkResult VKAPI_CALL
 tu_QueueWaitIdle(VkQueue _queue)
 {
    TU_FROM_HANDLE(tu_queue, queue, _queue);
 
-   if (tu_device_is_lost(queue->device))
+   if (vk_device_is_lost(&queue->device->vk))
       return VK_ERROR_DEVICE_LOST;
 
    if (queue->fence < 0)
       return VK_SUCCESS;
-
-   pthread_mutex_lock(&queue->device->submit_mutex);
-
-   do {
-      tu_device_submit_deferred_locked(queue->device);
-
-      if (list_is_empty(&queue->queued_submits))
-         break;
-
-      pthread_cond_wait(&queue->device->timeline_cond,
-            &queue->device->submit_mutex);
-   } while (!list_is_empty(&queue->queued_submits));
-
-   pthread_mutex_unlock(&queue->device->submit_mutex);
 
    struct pollfd fds = { .fd = queue->fence, .events = POLLIN };
    int ret;
@@ -1931,6 +1902,7 @@ tu_QueueWaitIdle(VkQueue _queue)
    queue->fence = -1;
    return VK_SUCCESS;
 }
+#endif
 
 VKAPI_ATTR VkResult VKAPI_CALL
 tu_EnumerateInstanceExtensionProperties(const char *pLayerName,

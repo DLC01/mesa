@@ -432,7 +432,7 @@ tu_QueueSubmit(VkQueue _queue,
       int ret = safe_ioctl(queue->device->physical_device->local_fd,
                            IOCTL_KGSL_GPU_COMMAND, &req);
       if (ret) {
-         result = tu_device_set_lost(queue->device,
+         result = vk_device_set_lost(&queue->device->vk,
                                      "submit failed: %s\n", strerror(errno));
          goto fail;
       }
@@ -447,7 +447,7 @@ tu_QueueSubmit(VkQueue _queue,
       if (i == submitCount - 1) {
          int fd = timestamp_to_fd(queue, req.timestamp);
          if (fd < 0) {
-            result = tu_device_set_lost(queue->device,
+            result = vk_device_set_lost(&queue->device->vk,
                                         "Failed to create sync file for timestamp: %s\n",
                                         strerror(errno));
             goto fail;
@@ -635,25 +635,18 @@ tu_GetFenceStatus(VkDevice _device, VkFence _fence)
 }
 
 int
-tu_signal_fences(struct tu_device *device, struct tu_syncobj *fence1, struct tu_syncobj *fence2)
+tu_signal_syncs(struct tu_device *device,
+                struct vk_sync *sync1, struct vk_sync *sync2)
 {
-   tu_finishme("tu_signal_fences");
+   tu_finishme("tu_signal_syncs");
    return 0;
 }
 
 int
-tu_syncobj_to_fd(struct tu_device *device, struct tu_syncobj *sync)
+tu_syncobj_to_fd(struct tu_device *device, struct vk_sync *sync)
 {
    tu_finishme("tu_syncobj_to_fd");
    return -1;
-}
-
-VkResult
-tu_device_submit_deferred_locked(struct tu_device *dev)
-{
-   tu_finishme("tu_device_submit_deferred_locked");
-
-   return VK_SUCCESS;
 }
 
 VkResult

@@ -97,6 +97,12 @@ typedef uint32_t xcb_window_t;
 #include "vk_image.h"
 #include "vk_command_buffer.h"
 #include "vk_queue.h"
+#include "vk_object.h"
+#include "vk_sync.h"
+#include "vk_fence.h"
+#include "vk_semaphore.h"
+#include "vk_drm_syncobj.h"
+#include "vk_sync_timeline.h"
 
 #define MAX_VBS 32
 #define MAX_VERTEX_ATTRIBS 32
@@ -225,6 +231,10 @@ struct tu_physical_device
    struct disk_cache *disk_cache;
 
    struct tu_memory_heap heap;
+
+   struct vk_sync_type syncobj_type;
+   struct vk_sync_timeline_type timeline_type;
+   const struct vk_sync_type *sync_types[3];
 };
 
 enum tu_debug_flags
@@ -298,8 +308,34 @@ struct tu_pipeline_key
 
 #define TU_MAX_QUEUE_FAMILIES 1
 
+/* Keep tu_syncobj until porting to common code for kgsl too */
+#ifdef TU_USE_KGSL
 struct tu_syncobj;
+#endif
 struct tu_u_trace_syncobj;
+
+/* Define tu_timeline_sync type based on drm syncobj for a point type
+ * for vk_sync_timeline, and the logic to handle is mostly copied from
+ * anv_bo_sync since it seems it can be used by similar way to anv.
+ */
+enum tu_timeline_sync_state {
+   /** Indicates that this is a new (or newly reset fence) */
+   TU_TIMELINE_SYNC_STATE_RESET,
+
+   /** Indicates that this fence has been submitted to the GPU but is still
+    * (as far as we know) in use by the GPU.
+    */
+   TU_TIMELINE_SYNC_STATE_SUBMITTED,
+
+   TU_TIMELINE_SYNC_STATE_SIGNALED,
+};
+
+struct tu_timeline_sync {
+   struct vk_sync base;
+
+   enum tu_timeline_sync_state state;
+   uint32_t syncobj;
+};
 
 struct tu_queue
 {
@@ -309,9 +345,6 @@ struct tu_queue
 
    uint32_t msm_queue_id;
    int fence;
-
-   /* Queue containing deferred submits */
-   struct list_head queued_submits;
 };
 
 struct tu_bo
@@ -379,7 +412,6 @@ struct tu_device
 
    struct tu_physical_device *physical_device;
    int fd;
-   int _lost;
 
    struct ir3_compiler *compiler;
 
@@ -451,17 +483,6 @@ struct tu_device
 void tu_init_clear_blit_shaders(struct tu_device *dev);
 
 void tu_destroy_clear_blit_shaders(struct tu_device *dev);
-
-VkResult _tu_device_set_lost(struct tu_device *device,
-                             const char *msg, ...) PRINTFLIKE(2, 3);
-#define tu_device_set_lost(dev, ...) \
-   _tu_device_set_lost(dev, __VA_ARGS__)
-
-static inline bool
-tu_device_is_lost(struct tu_device *device)
-{
-   return unlikely(p_atomic_read(&device->_lost));
-}
 
 VkResult
 tu_device_submit_deferred_locked(struct tu_device *dev);
@@ -1719,11 +1740,13 @@ void
 tu_drm_submitqueue_close(const struct tu_device *dev, uint32_t queue_id);
 
 int
-tu_signal_fences(struct tu_device *device, struct tu_syncobj *fence1, struct tu_syncobj *fence2);
+tu_signal_syncs(struct tu_device *device, struct vk_sync *sync1, struct vk_sync *sync2);
 
 int
-tu_syncobj_to_fd(struct tu_device *device, struct tu_syncobj *sync);
+tu_syncobj_to_fd(struct tu_device *device, struct vk_sync *sync);
 
+VkResult
+tu_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit);
 
 void
 tu_copy_timestamp_buffer(struct u_trace_context *utctx, void *cmdstream,

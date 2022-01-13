@@ -93,8 +93,22 @@ struct intel_device_info
    int ver;
    int verx10;
    int display_ver;
+
+   /**
+    * This revision is from ioctl (I915_PARAM_REVISION) unlike
+    * pci_revision_id from drm device. Its value is not always
+    * same as the pci_revision_id.
+    */
    int revision;
    int gt;
+
+   /* PCI info */
+   uint16_t pci_domain;
+   uint8_t pci_bus;
+   uint8_t pci_dev;
+   uint8_t pci_func;
+   uint16_t pci_device_id;
+   uint8_t pci_revision_id;
 
    enum intel_platform platform;
 
@@ -347,17 +361,12 @@ struct intel_device_info
    int simulator_id;
 
    /**
-    * holds the pci device id
-    */
-   uint32_t chipset_id;
-
-   /**
     * holds the name of the device
     */
    char name[INTEL_DEVICE_MAX_NAME_SIZE];
 
    /**
-    * no_hw is true when the chipset_id pci device id has been overridden
+    * no_hw is true when the pci_device_id has been overridden
     */
    bool no_hw;
    /** @} */

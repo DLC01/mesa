@@ -562,8 +562,8 @@ anv_physical_device_init_uuids(struct anv_physical_device *device)
     */
    _mesa_sha1_init(&sha1_ctx);
    _mesa_sha1_update(&sha1_ctx, build_id_data(note), build_id_len);
-   _mesa_sha1_update(&sha1_ctx, &device->info.chipset_id,
-                     sizeof(device->info.chipset_id));
+   _mesa_sha1_update(&sha1_ctx, &device->info.pci_device_id,
+                     sizeof(device->info.pci_device_id));
    _mesa_sha1_update(&sha1_ctx, &device->always_use_bindless,
                      sizeof(device->always_use_bindless));
    _mesa_sha1_update(&sha1_ctx, &device->has_a64_buffer_access,
@@ -576,7 +576,7 @@ anv_physical_device_init_uuids(struct anv_physical_device *device)
    memcpy(device->pipeline_cache_uuid, sha1, VK_UUID_SIZE);
 
    intel_uuid_compute_driver_id(device->driver_uuid, &device->info, VK_UUID_SIZE);
-   intel_uuid_compute_device_id(device->device_uuid, &device->isl_dev, VK_UUID_SIZE);
+   intel_uuid_compute_device_id(device->device_uuid, &device->info, VK_UUID_SIZE);
 
    return VK_SUCCESS;
 }
@@ -587,7 +587,7 @@ anv_physical_device_init_disk_cache(struct anv_physical_device *device)
 #ifdef ENABLE_SHADER_CACHE
    char renderer[10];
    ASSERTED int len = snprintf(renderer, sizeof(renderer), "anv_%04x",
-                               device->info.chipset_id);
+                               device->info.pci_device_id);
    assert(len == sizeof(renderer) - 2);
 
    char timestamp[41];
@@ -801,11 +801,6 @@ anv_physical_device_try_create(struct anv_instance *instance,
 
    device->info = devinfo;
    device->is_alpha = is_alpha;
-
-   device->pci_info.domain = drm_device->businfo.pci->domain;
-   device->pci_info.bus = drm_device->businfo.pci->bus;
-   device->pci_info.device = drm_device->businfo.pci->dev;
-   device->pci_info.function = drm_device->businfo.pci->func;
 
    device->cmd_parser_version = -1;
    if (device->info.ver == 7) {
@@ -1954,7 +1949,7 @@ void anv_GetPhysicalDeviceProperties(
       .apiVersion = ANV_API_VERSION,
       .driverVersion = vk_get_driver_version(),
       .vendorID = 0x8086,
-      .deviceID = pdevice->info.chipset_id,
+      .deviceID = pdevice->info.pci_device_id,
       .deviceType = pdevice->info.has_local_mem ?
                     VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU :
                     VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
@@ -2320,10 +2315,10 @@ void anv_GetPhysicalDeviceProperties2(
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT: {
          VkPhysicalDevicePCIBusInfoPropertiesEXT *properties =
             (VkPhysicalDevicePCIBusInfoPropertiesEXT *)ext;
-         properties->pciDomain = pdevice->pci_info.domain;
-         properties->pciBus = pdevice->pci_info.bus;
-         properties->pciDevice = pdevice->pci_info.device;
-         properties->pciFunction = pdevice->pci_info.function;
+         properties->pciDomain = pdevice->info.pci_domain;
+         properties->pciBus = pdevice->info.pci_bus;
+         properties->pciDevice = pdevice->info.pci_dev;
+         properties->pciFunction = pdevice->info.pci_func;
          break;
       }
 
