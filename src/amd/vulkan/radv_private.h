@@ -312,7 +312,7 @@ struct radv_physical_device {
    dev_t render_devid;
 #endif
 
-   nir_shader_compiler_options nir_options;
+   nir_shader_compiler_options nir_options[MESA_VULKAN_SHADER_STAGES];
 };
 
 struct radv_instance {
@@ -857,6 +857,9 @@ struct radv_device {
 
    struct u_rwlock vs_prologs_lock;
    struct hash_table *vs_prologs;
+
+   /* Prime blit sdma queue */
+   struct radv_queue *private_sdma_queue;
 
    struct radv_shader_prolog *simple_vs_prologs[MAX_VERTEX_ATTRIBS];
    struct radv_shader_prolog *instance_rate_vs_prologs[816];
@@ -1706,7 +1709,8 @@ struct radv_event {
 #define RADV_HASH_SHADER_USE_NGG_CULLING   (1 << 13)
 #define RADV_HASH_SHADER_ROBUST_BUFFER_ACCESS (1 << 14)
 #define RADV_HASH_SHADER_ROBUST_BUFFER_ACCESS2 (1 << 15)
-#define RADV_HASH_SHADER_FORCE_EMULATE_RT (1 << 16)
+#define RADV_HASH_SHADER_FORCE_EMULATE_RT      (1 << 16)
+#define RADV_HASH_SHADER_SPLIT_FMA             (1 << 17)
 
 struct radv_pipeline_key;
 
@@ -2329,6 +2333,7 @@ struct radv_image_create_info {
    const VkImageCreateInfo *vk_info;
    bool scanout;
    bool no_metadata_planes;
+   bool prime_blit_src;
    const struct radeon_bo_metadata *bo_metadata;
 };
 
@@ -2541,6 +2546,10 @@ struct radv_query_pool {
 
 bool radv_queue_internal_submit(struct radv_queue *queue, struct radeon_cmdbuf *cs);
 
+int radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
+                    const VkDeviceQueueCreateInfo *create_info,
+                    const VkDeviceQueueGlobalPriorityCreateInfoEXT *global_priority);
+
 void radv_set_descriptor_set(struct radv_cmd_buffer *cmd_buffer, VkPipelineBindPoint bind_point,
                              struct radv_descriptor_set *set, unsigned idx);
 
@@ -2595,6 +2604,9 @@ bool radv_get_thread_trace(struct radv_queue *queue, struct ac_thread_trace *thr
 void radv_emit_thread_trace_userdata(const struct radv_device *device, struct radeon_cmdbuf *cs,
                                      const void *data, uint32_t num_dwords);
 bool radv_is_instruction_timing_enabled(void);
+
+bool radv_sdma_copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
+                          struct radv_buffer *buffer, const VkBufferImageCopy2KHR *region);
 
 /* radv_sqtt_layer_.c */
 struct radv_barrier_data {

@@ -465,9 +465,9 @@ isl_tiling_get_info(enum isl_tiling tiling,
       break;
 
    case ISL_TILING_HIZ:
-      /* HiZ buffers are required to have ISL_FORMAT_HIZ which is an 8x4
-       * 128bpb format.  The tiling has the same physical dimensions as
-       * Y-tiling but actually has two HiZ columns per Y-tiled column.
+      /* HiZ buffers are required to have a 128bpb HiZ format. The tiling has
+       * the same physical dimensions as Y-tiling but actually has two HiZ
+       * columns per Y-tiled column.
        */
       assert(bs == 16);
       logical_el = isl_extent4d(16, 16, 1, 1);
@@ -591,7 +591,7 @@ isl_surf_choose_tiling(const struct isl_device *dev,
 
    /* HiZ surfaces always use the HiZ tiling */
    if (info->usage & ISL_SURF_USAGE_HIZ_BIT) {
-      assert(info->format == ISL_FORMAT_HIZ);
+      assert(isl_format_is_hiz(info->format));
       assert(tiling_flags == ISL_TILING_HIZ_BIT);
       *tiling = isl_tiling_flag_to_enum(tiling_flags);
       return true;
@@ -841,7 +841,7 @@ isl_choose_image_alignment_el(const struct isl_device *dev,
        */
       *image_align_el = isl_extent3d(4, 4, 1);
       return;
-   } else if (info->format == ISL_FORMAT_HIZ) {
+   } else if (fmtl->txc == ISL_TXC_HIZ) {
       assert(ISL_GFX_VER(dev) >= 6);
       if (ISL_GFX_VER(dev) == 6) {
          /* HiZ surfaces on Sandy Bridge are packed tightly. */
@@ -852,11 +852,42 @@ isl_choose_image_alignment_el(const struct isl_device *dev,
           */
          *image_align_el = isl_extent3d(2, 2, 1);
       } else {
-         /* On gfx12+, HiZ surfaces are always aligned to 16x16 pixels in the
-          * primary surface which works out to 2x4 HiZ elments.
-          * TODO: Verify
+         /* We choose the alignments based on the docs and what we've seen on
+          * prior platforms. From the TGL PRM Vol. 9, "Hierarchical Depth
+          * Buffer":
+          *
+          *    The height and width of the hierarchical depth buffer that must
+          *    be allocated are computed by the following formulas, where HZ
+          *    is the hierarchical depth buffer and Z is the depth buffer. The
+          *    Z_Height, Z_Width, and Z_Depth values given in these formulas
+          *    are those present in 3DSTATE_DEPTH_BUFFER incremented by one.
+          *
+          * The note about 3DSTATE_DEPTH_BUFFER tells us that the dimensions
+          * in the following formula refers to the base level. The key formula
+          * for the horizontal alignment is:
+          *
+          *    HZ_Width (bytes) [=]
+          *    ceiling(Z_Width / 16) * 16
+          *
+          * This type of formula is used when sizing compression blocks. So,
+          * the docs seem to say that the HiZ format has a block width of 16,
+          * and thus, the surface has a minimum horizontal alignment of 16
+          * pixels. This formula hasn't changed from prior platforms (where
+          * we've chosen a horizontal alignment of 16), so we should be on the
+          * right track. As for the vertical alignment, we're told:
+          *
+          *    To compute the minimum QPitch for the HZ surface, the height of
+          *    each LOD in pixels is determined using the equations for hL in
+          *    the GPU Overview volume, using a vertical alignment j=16.
+          *
+          * We're not calculating the QPitch right now, but the vertical
+          * alignment is plainly given as 16 rows in the depth buffer.
+          *
+          * As a result, we believe that HiZ surfaces are aligned to 16x16
+          * pixels in the primary surface. We divide this area by the HiZ
+          * block dimensions to get the alignment in terms of HiZ blocks.
           */
-         *image_align_el = isl_extent3d(2, 4, 1);
+         *image_align_el = isl_extent3d(16 / fmtl->bw, 16 / fmtl->bh, 1);
       }
       return;
    }
@@ -1947,35 +1978,24 @@ isl_surf_get_hiz_surf(const struct isl_device *dev,
                       const struct isl_surf *surf,
                       struct isl_surf *hiz_surf)
 {
-   assert(ISL_GFX_VER(dev) >= 5 && ISL_DEV_USE_SEPARATE_STENCIL(dev));
+   /* HiZ support does not exist prior to Gfx5 */
+   if (ISL_GFX_VER(dev) < 5)
+      return false;
 
    if (!isl_surf_usage_is_depth(surf->usage))
       return false;
 
-   /* HiZ only works with Y-tiled depth buffers */
-   if (!isl_tiling_is_any_y(surf->tiling))
+   /* From the Sandy Bridge PRM, Vol 2 Part 1,
+    * 3DSTATE_DEPTH_BUFFER::Hierarchical Depth Buffer Enable,
+    *
+    *    If this field is enabled, the Surface Format of the depth buffer
+    *    cannot be D32_FLOAT_S8X24_UINT or D24_UNORM_S8_UINT. Use of stencil
+    *    requires the separate stencil buffer.
+    *
+    * On SNB+, HiZ can't be used with combined depth-stencil buffers.
+    */
+   if (isl_surf_usage_is_stencil(surf->usage))
       return false;
-
-   /* On SNB+, compressed depth buffers cannot be interleaved with stencil. */
-   switch (surf->format) {
-   case ISL_FORMAT_R24_UNORM_X8_TYPELESS:
-      if (isl_surf_usage_is_depth_and_stencil(surf->usage)) {
-         assert(ISL_GFX_VER(dev) == 5);
-         unreachable("This should work, but is untested");
-      }
-      FALLTHROUGH;
-   case ISL_FORMAT_R16_UNORM:
-   case ISL_FORMAT_R32_FLOAT:
-      break;
-   case ISL_FORMAT_R32_FLOAT_X8X24_TYPELESS:
-      if (ISL_GFX_VER(dev) == 5) {
-         assert(isl_surf_usage_is_depth_and_stencil(surf->usage));
-         unreachable("This should work, but is untested");
-      }
-      FALLTHROUGH;
-   default:
-      return false;
-   }
 
    /* Multisampled depth is always interleaved */
    assert(surf->msaa_layout == ISL_MSAA_LAYOUT_NONE ||
@@ -1998,35 +2018,9 @@ isl_surf_get_hiz_surf(const struct isl_device *dev,
     *    Z_Width must be multiplied by 4 before being applied to the table
     *    below if Number of Multisamples is set to NUMSAMPLES_8."
     *
-    * In the Sky Lake PRM, the second paragraph is replaced with this:
-    *
-    *    "The Z_Height and Z_Width values must equal those present in
-    *    3DSTATE_DEPTH_BUFFER incremented by one."
-    *
-    * In other words, on Sandy Bridge through Broadwell, each 128-bit HiZ
-    * block corresponds to a region of 8x4 samples in the primary depth
-    * surface.  On Sky Lake, on the other hand, each HiZ block corresponds to
-    * a region of 8x4 pixels in the primary depth surface regardless of the
-    * number of samples.  The dimensions of a HiZ block in both pixels and
-    * samples are given in the table below:
-    *
-    *                    | SNB - BDW |     SKL+
-    *              ------+-----------+-------------
-    *                1x  |  8 x 4 sa |   8 x 4 sa
-    *               MSAA |  8 x 4 px |   8 x 4 px
-    *              ------+-----------+-------------
-    *                2x  |  8 x 4 sa |  16 x 4 sa
-    *               MSAA |  4 x 4 px |   8 x 4 px
-    *              ------+-----------+-------------
-    *                4x  |  8 x 4 sa |  16 x 8 sa
-    *               MSAA |  4 x 2 px |   8 x 4 px
-    *              ------+-----------+-------------
-    *                8x  |  8 x 4 sa |  32 x 8 sa
-    *               MSAA |  2 x 2 px |   8 x 4 px
-    *              ------+-----------+-------------
-    *               16x  |    N/A    | 32 x 16 sa
-    *               MSAA |    N/A    |  8 x  4 px
-    *              ------+-----------+-------------
+    * In the Sky Lake PRM, the second paragraph is gone.  This means that,
+    * from Sandy Bridge through Broadwell, HiZ compresses samples in the
+    * primary depth surface.  On Sky Lake and onward, HiZ compresses pixels.
     *
     * There are a number of different ways that this discrepency could be
     * handled.  The way we have chosen is to simply make MSAA HiZ have the
@@ -2038,9 +2032,12 @@ isl_surf_get_hiz_surf(const struct isl_device *dev,
     */
    const unsigned samples = ISL_GFX_VER(dev) >= 9 ? 1 : surf->samples;
 
+   const enum isl_format format =
+      ISL_GFX_VERX10(dev) >= 125 ? ISL_FORMAT_GFX125_HIZ : ISL_FORMAT_HIZ;
+
    return isl_surf_init(dev, hiz_surf,
                         .dim = surf->dim,
-                        .format = ISL_FORMAT_HIZ,
+                        .format = format,
                         .width = surf->logical_level0_px.width,
                         .height = surf->logical_level0_px.height,
                         .depth = surf->logical_level0_px.depth,
@@ -2167,7 +2164,7 @@ isl_surf_supports_ccs(const struct isl_device *dev,
 
          assert(hiz_surf->usage & ISL_SURF_USAGE_HIZ_BIT);
          assert(hiz_surf->tiling == ISL_TILING_HIZ);
-         assert(hiz_surf->format == ISL_FORMAT_HIZ);
+         assert(isl_format_is_hiz(hiz_surf->format));
       } else if (surf->samples > 1) {
          const struct isl_surf *mcs_surf = hiz_or_mcs_surf;
 

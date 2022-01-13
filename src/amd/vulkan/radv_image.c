@@ -531,6 +531,11 @@ radv_patch_image_from_extra_info(struct radv_device *device, struct radv_image *
 
          image->info.surf_index = NULL;
       }
+
+      if (create_info->prime_blit_src && device->physical_device->rad_info.chip_class == GFX9) {
+         /* Older SDMA hw can't handle DCC */
+         image->planes[plane].surface.flags |= RADEON_SURF_DISABLE_DCC;
+      }
    }
    return VK_SUCCESS;
 }
@@ -2310,11 +2315,13 @@ radv_CreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo,
    const struct wsi_image_create_info *wsi_info =
       vk_find_struct_const(pCreateInfo->pNext, WSI_IMAGE_CREATE_INFO_MESA);
    bool scanout = wsi_info && wsi_info->scanout;
+   bool prime_blit_src = wsi_info && wsi_info->prime_blit_src;
 
    return radv_image_create(device,
                             &(struct radv_image_create_info){
                                .vk_info = pCreateInfo,
                                .scanout = scanout,
+                               .prime_blit_src = prime_blit_src,
                             },
                             pAllocator, pImage);
 }
@@ -2356,7 +2363,7 @@ radv_GetImageSubresourceLayout(VkDevice _device, VkImage _image,
       pLayout->offset = ac_surface_get_plane_offset(device->physical_device->rad_info.chip_class,
                                                     surface, mem_plane_id, 0);
       pLayout->rowPitch = ac_surface_get_plane_stride(device->physical_device->rad_info.chip_class,
-                                                      surface, mem_plane_id);
+                                                      surface, mem_plane_id, level);
       pLayout->arrayPitch = 0;
       pLayout->depthPitch = 0;
       pLayout->size = ac_surface_get_plane_size(surface, mem_plane_id);

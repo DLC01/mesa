@@ -186,17 +186,9 @@ struct intel_device_info
    unsigned ppipe_subslices[INTEL_DEVICE_MAX_PIXEL_PIPES];
 
    /**
-    * Upper bound of number of EU per subslice (some SKUs might have just 1 EU
-    * fused across all subslices, like 47 EUs, in which case this number won't
-    * be acurate for one subslice).
+    * Maximum number of EUs per subslice (some EUs can be fused off).
     */
-   unsigned num_eu_per_subslice;
-
-   /**
-    * Maximum number of EUs per subslice (can be more than num_eu_per_subslice
-    * if some EUs are fused off).
-    */
-   unsigned max_eu_per_subslice;
+   unsigned max_eus_per_subslice;
 
    /**
     * Number of threads per eu, varies between 4 and 8 between generations.
@@ -384,6 +376,14 @@ struct intel_device_info
     (devinfo)->platform == INTEL_PLATFORM_GLK)
 
 #endif
+
+static inline bool
+intel_device_info_slice_available(const struct intel_device_info *devinfo,
+                                  int slice)
+{
+   assert(slice < INTEL_DEVICE_MAX_SLICES);
+   return (devinfo->slice_masks & (1U << slice)) != 0;
+}
 
 static inline bool
 intel_device_info_subslice_available(const struct intel_device_info *devinfo,

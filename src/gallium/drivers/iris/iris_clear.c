@@ -169,6 +169,7 @@ fast_clear_color(struct iris_context *ice,
                  union isl_color_value color)
 {
    struct iris_batch *batch = &ice->batches[IRIS_BATCH_RENDER];
+   const struct intel_device_info *devinfo = &batch->screen->devinfo;
    struct pipe_resource *p_res = (void *) res;
 
    bool color_changed = res->aux.clear_color_unknown ||
@@ -257,7 +258,12 @@ fast_clear_color(struct iris_context *ice,
    iris_emit_end_of_pipe_sync(batch,
                               "fast clear: pre-flush",
                               PIPE_CONTROL_RENDER_TARGET_FLUSH |
-                              PIPE_CONTROL_TILE_CACHE_FLUSH);
+                              PIPE_CONTROL_TILE_CACHE_FLUSH |
+                              (devinfo->verx10 == 120 ?
+                                 PIPE_CONTROL_DEPTH_STALL : 0) |
+                              (devinfo->verx10 == 125 ?
+                                 PIPE_CONTROL_FLUSH_HDC : 0) |
+                              PIPE_CONTROL_PSS_STALL_SYNC);
 
    iris_batch_sync_region_start(batch);
 
@@ -281,7 +287,11 @@ fast_clear_color(struct iris_context *ice,
    blorp_batch_finish(&blorp_batch);
    iris_emit_end_of_pipe_sync(batch,
                               "fast clear: post flush",
-                              PIPE_CONTROL_RENDER_TARGET_FLUSH);
+                              PIPE_CONTROL_RENDER_TARGET_FLUSH |
+                              (devinfo->verx10 == 120 ?
+                                 PIPE_CONTROL_TILE_CACHE_FLUSH |
+                                 PIPE_CONTROL_DEPTH_STALL : 0) |
+                              PIPE_CONTROL_PSS_STALL_SYNC);
    iris_batch_sync_region_end(batch);
 
    iris_resource_set_aux_state(ice, res, level, box->z,

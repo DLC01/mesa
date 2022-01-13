@@ -123,7 +123,14 @@ static unsigned si_texture_get_offset(struct si_screen *sscreen, struct si_textu
                                       unsigned *layer_stride)
 {
    if (sscreen->info.chip_class >= GFX9) {
-      *stride = tex->surface.u.gfx9.surf_pitch * tex->surface.bpe;
+      unsigned pitch;
+      if (tex->surface.is_linear) {
+         pitch = tex->surface.u.gfx9.pitch[level];
+      } else {
+         pitch = tex->surface.u.gfx9.surf_pitch;
+      }
+
+      *stride = pitch * tex->surface.bpe;
       *layer_stride = tex->surface.u.gfx9.surf_slice_size;
 
       if (!box)
@@ -133,9 +140,8 @@ static unsigned si_texture_get_offset(struct si_screen *sscreen, struct si_textu
        * of mipmap levels. */
       return tex->surface.u.gfx9.surf_offset + box->z * tex->surface.u.gfx9.surf_slice_size +
              tex->surface.u.gfx9.offset[level] +
-             (box->y / tex->surface.blk_h * tex->surface.u.gfx9.surf_pitch +
-              box->x / tex->surface.blk_w) *
-                tex->surface.bpe;
+             (box->y / tex->surface.blk_h * pitch + box->x / tex->surface.blk_w) *
+             tex->surface.bpe;
    } else {
       *stride = tex->surface.u.legacy.level[level].nblk_x * tex->surface.bpe;
       assert((uint64_t)tex->surface.u.legacy.level[level].slice_size_dw * 4 <= UINT_MAX);
@@ -587,15 +593,17 @@ static bool si_resource_get_param(struct pipe_screen *screen, struct pipe_contex
          *value = 0;
       else
          *value = ac_surface_get_plane_stride(sscreen->info.chip_class,
-                                              &tex->surface, plane);
+                                              &tex->surface, plane, level);
       return true;
 
    case PIPE_RESOURCE_PARAM_OFFSET:
-      if (resource->target == PIPE_BUFFER)
+      if (resource->target == PIPE_BUFFER) {
          *value = 0;
-      else
+      } else {
+         uint64_t level_offset = tex->surface.is_linear ? tex->surface.u.gfx9.offset[level] : 0;
          *value = ac_surface_get_plane_offset(sscreen->info.chip_class,
-                                              &tex->surface, plane, layer);
+                                              &tex->surface, plane, layer)  + level_offset;
+      }
       return true;
 
    case PIPE_RESOURCE_PARAM_MODIFIER:
@@ -679,7 +687,7 @@ static bool si_texture_get_handle(struct pipe_screen *screen, struct pipe_contex
          whandle->offset = ac_surface_get_plane_offset(sscreen->info.chip_class,
                                                        &tex->surface, plane, 0);
          whandle->stride = ac_surface_get_plane_stride(sscreen->info.chip_class,
-                                                       &tex->surface, plane);
+                                                       &tex->surface, plane, 0);
          whandle->modifier = tex->surface.modifier;
          return sscreen->ws->buffer_get_handle(sscreen->ws, res->buf, whandle);
       }
@@ -1580,7 +1588,7 @@ static struct pipe_resource *si_texture_from_winsys_buffer(struct si_screen *ssc
           ptex->offset != ac_surface_get_plane_offset(sscreen->info.chip_class,
                                                       &tex->surface, plane, 0) ||
           ptex->stride != ac_surface_get_plane_stride(sscreen->info.chip_class,
-                                                      &tex->surface, plane)) {
+                                                      &tex->surface, plane, 0)) {
          si_texture_reference(&tex, NULL);
          return NULL;
       }

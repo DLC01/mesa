@@ -75,6 +75,7 @@ struct spirv_supported_capabilities {
    bool mesh_shading_nv;
    bool min_lod;
    bool multiview;
+   bool per_view_attributes_nv;
    bool physical_storage_buffer_address;
    bool post_depth_coverage;
    bool printf;
@@ -85,6 +86,7 @@ struct spirv_supported_capabilities {
    bool float_controls;
    bool shader_clock;
    bool shader_viewport_index_layer;
+   bool shader_viewport_mask_nv;
    bool sparse_residency;
    bool stencil_export;
    bool storage_8bit;

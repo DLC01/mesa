@@ -850,12 +850,14 @@ static const struct debug_control radv_debug_options[] = {
    {"img", RADV_DEBUG_IMG},
    {"noumr", RADV_DEBUG_NO_UMR},
    {"invariantgeom", RADV_DEBUG_INVARIANT_GEOM},
+   {"splitfma", RADV_DEBUG_SPLIT_FMA},
    {"nodisplaydcc", RADV_DEBUG_NO_DISPLAY_DCC},
    {"notccompatcmask", RADV_DEBUG_NO_TC_COMPAT_CMASK},
    {"novrsflatshading", RADV_DEBUG_NO_VRS_FLAT_SHADING},
    {"noatocdithering", RADV_DEBUG_NO_ATOC_DITHERING},
    {"nonggc", RADV_DEBUG_NO_NGGC},
    {"prologs", RADV_DEBUG_DUMP_PROLOGS},
+   {"nodma", RADV_DEBUG_NO_DMA_BLIT},
    {NULL, 0}};
 
 const char *
@@ -908,6 +910,7 @@ static const driOptionDescription radv_dri_options[] = {
       DRI_CONF_RADV_ZERO_VRAM(false)
       DRI_CONF_RADV_LOWER_DISCARD_TO_DEMOTE(false)
       DRI_CONF_RADV_INVARIANT_GEOM(false)
+      DRI_CONF_RADV_SPLIT_FMA(false)
       DRI_CONF_RADV_DISABLE_TC_COMPAT_HTILE_GENERAL(false)
       DRI_CONF_RADV_DISABLE_DCC(false)
       DRI_CONF_RADV_REPORT_APU_AS_DGPU(false)
@@ -949,6 +952,9 @@ radv_init_dri_options(struct radv_instance *instance)
 
    if (driQueryOptionb(&instance->dri_options, "radv_invariant_geom"))
       instance->debug_flags |= RADV_DEBUG_INVARIANT_GEOM;
+
+   if (driQueryOptionb(&instance->dri_options, "radv_split_fma"))
+      instance->debug_flags |= RADV_DEBUG_SPLIT_FMA;
 
    if (driQueryOptionb(&instance->dri_options, "radv_disable_dcc"))
       instance->debug_flags |= RADV_DEBUG_NO_DCC;
@@ -2634,9 +2640,9 @@ radv_get_queue_global_priority(const VkDeviceQueueGlobalPriorityCreateInfoEXT *p
    }
 }
 
-static int
-radv_queue_init(struct radv_device *device, struct radv_queue *queue,
-                int idx, const VkDeviceQueueCreateInfo *create_info,
+int
+radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
+                const VkDeviceQueueCreateInfo *create_info,
                 const VkDeviceQueueGlobalPriorityCreateInfoEXT *global_priority)
 {
    queue->device = device;
@@ -3104,6 +3110,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
             goto fail;
       }
    }
+   device->private_sdma_queue = VK_NULL_HANDLE;
 
    device->pbb_allowed = device->physical_device->rad_info.chip_class >= GFX9 &&
                          !(device->instance->debug_flags & RADV_DEBUG_NOBINNING);
@@ -3329,6 +3336,10 @@ radv_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
          radv_queue_finish(&device->queues[i][q]);
       if (device->queue_count[i])
          vk_free(&device->vk.alloc, device->queues[i]);
+   }
+   if (device->private_sdma_queue != VK_NULL_HANDLE) {
+      radv_queue_finish(device->private_sdma_queue);
+      vk_free(&device->vk.alloc, device->private_sdma_queue);
    }
 
    for (unsigned i = 0; i < RADV_NUM_HW_CTX; i++) {
@@ -3777,6 +3788,9 @@ radv_get_preamble_cs(struct radv_queue *queue, uint32_t scratch_size_per_wave,
    unsigned tess_offchip_ring_offset;
    uint32_t ring_bo_flags = RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING;
    VkResult result = VK_SUCCESS;
+   if (queue->vk.queue_family_index == RADV_QUEUE_TRANSFER)
+      return VK_SUCCESS;
+
    if (!queue->has_tess_rings) {
       if (needs_tess_rings)
          add_tess_rings = true;
@@ -4618,6 +4632,13 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
    } else {
       mem->image = NULL;
       mem->buffer = NULL;
+   }
+
+   if (wsi_info && wsi_info->implicit_sync && mem->buffer) {
+      /* Mark the linear prime buffer (aka the destination of the prime blit
+       * as uncached.
+       */
+      flags |= RADEON_FLAG_VA_UNCACHED;
    }
 
    float priority_float = 0.5;
