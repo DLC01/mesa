@@ -56,6 +56,10 @@ static void
 blorp_measure_start(struct blorp_batch *batch,
                     const struct blorp_params *params);
 
+static void
+blorp_measure_end(struct blorp_batch *batch,
+                  const struct blorp_params *params);
+
 static void *
 blorp_alloc_dynamic_state(struct blorp_batch *batch,
                           uint32_t size,
@@ -886,12 +890,9 @@ blorp_emit_ps_config(struct blorp_batch *batch,
        *
        * In Gfx8 the format is U8-2 whereas in Gfx9+ it is U9-1.
        */
-      if (GFX_VERx10 >= 125)
-         ps.MaximumNumberofThreadsPerPSD = 96 - 1;
-      else if (GFX_VER >= 9)
-         ps.MaximumNumberofThreadsPerPSD = 64 - 1;
-      else
-         ps.MaximumNumberofThreadsPerPSD = 64 - 2;
+      const struct intel_device_info *devinfo = batch->blorp->compiler->devinfo;
+      ps.MaximumNumberofThreadsPerPSD =
+         devinfo->max_threads_per_psd - (GFX_VER == 8 ? 2 : 1);
 
       switch (params->fast_clear_op) {
       case ISL_AUX_OP_NONE:
@@ -1785,6 +1786,8 @@ blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
     */
    assert(params->depth.enabled || params->stencil.enabled);
 
+   blorp_measure_start(batch, params);
+
    /* The stencil buffer should only be enabled if a fast clear operation is
     * requested.
     */
@@ -1835,8 +1838,6 @@ blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
       blorp_emit_depth_stencil_config(batch, params);
    }
 
-   blorp_measure_start(batch, params);
-
    blorp_emit(batch, GENX(3DSTATE_WM_HZ_OP), hzp) {
       switch (params->hiz_op) {
       case ISL_AUX_OP_FAST_CLEAR:
@@ -1882,6 +1883,8 @@ blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
    }
 
    blorp_emit(batch, GENX(3DSTATE_WM_HZ_OP), hzp);
+
+   blorp_measure_end(batch, params);
 }
 #endif
 
@@ -2022,6 +2025,8 @@ blorp_exec_3d(struct blorp_batch *batch, const struct blorp_params *params)
    }
 #endif
 
+   blorp_measure_start(batch, params);
+
    blorp_emit_vertex_buffers(batch, params);
    blorp_emit_vertex_elements(batch, params);
 
@@ -2032,8 +2037,6 @@ blorp_exec_3d(struct blorp_batch *batch, const struct blorp_params *params)
    if (!(batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL))
       blorp_emit_depth_stencil_config(batch, params);
 
-   blorp_measure_start(batch, params);
-
    blorp_emit(batch, GENX(3DPRIMITIVE), prim) {
       prim.VertexAccessType = SEQUENTIAL;
       prim.PrimitiveTopologyType = _3DPRIM_RECTLIST;
@@ -2043,6 +2046,8 @@ blorp_exec_3d(struct blorp_batch *batch, const struct blorp_params *params)
       prim.VertexCountPerInstance = 3;
       prim.InstanceCount = params->num_layers;
    }
+
+   blorp_measure_end(batch, params);
 }
 
 #if GFX_VER >= 7
@@ -2110,6 +2115,8 @@ blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
    assert(!(batch->flags & BLORP_BATCH_NO_UPDATE_CLEAR_COLOR));
    assert(!(batch->flags & BLORP_BATCH_PREDICATE_ENABLE));
    assert(params->hiz_op == ISL_AUX_OP_NONE);
+
+   blorp_measure_start(batch, params);
 
 #if GFX_VER >= 7
 
@@ -2284,6 +2291,8 @@ blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
    unreachable("Compute blorp is not supported on SNB and earlier");
 
 #endif /* GFX_VER >= 7 */
+
+   blorp_measure_end(batch, params);
 }
 
 

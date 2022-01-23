@@ -77,7 +77,7 @@ foreach g : [['70', ['gfx7_cmd_buffer.c']], ['75', ['gfx7_cmd_buffer.c']],
     dependencies : [
       dep_libdrm, dep_valgrind, idep_nir_headers, idep_genxml,
       idep_vulkan_util_headers, idep_vulkan_wsi_headers,
-      idep_vulkan_runtime_headers,
+      idep_vulkan_runtime_headers, idep_intel_driver_ds_headers,
     ],
   )
 endforeach
@@ -111,6 +111,7 @@ libanv_files = files(
   'anv_private.h',
   'anv_queue.c',
   'anv_util.c',
+  'anv_utrace.c',
   'anv_wsi.c',
 )
 
@@ -127,6 +128,8 @@ anv_flags = [
   no_override_init_args,
   c_sse2_args,
 ]
+
+anv_cpp_flags = []
 
 if with_platform_x11
   anv_deps += dep_xcb_dri3
@@ -150,6 +153,8 @@ else
   libanv_files += files('anv_android_stubs.c')
 endif
 
+anv_deps += idep_intel_driver_ds_headers
+
 libanv_common = static_library(
   'anv_common',
   [
@@ -161,6 +166,7 @@ libanv_common = static_library(
     inc_util,
   ],
   c_args : anv_flags,
+  cpp_args : anv_cpp_flags,
   gnu_symbol_visibility : 'hidden',
   dependencies : anv_deps,
 )
@@ -179,6 +185,7 @@ libvulkan_intel = shared_library(
     dep_thread, dep_dl, dep_m, anv_deps, idep_libintel_common,
     idep_nir, idep_genxml, idep_vulkan_util, idep_vulkan_wsi,
     idep_vulkan_runtime, idep_mesautil, idep_xmlconfig,
+    idep_intel_driver_ds,
   ],
   c_args : anv_flags,
   gnu_symbol_visibility : 'hidden',
@@ -233,7 +240,7 @@ if with_tests
         dependencies : [
           dep_libdrm, dep_thread, dep_m, dep_valgrind,
           idep_vulkan_util, idep_vulkan_wsi_headers,
-          idep_vulkan_runtime,
+          idep_vulkan_runtime, idep_intel_driver_ds,
         ],
         include_directories : [
           inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_intel, inc_compiler,

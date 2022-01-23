@@ -25,6 +25,7 @@
 #include "d3d12_compiler.h"
 #include "d3d12_debug.h"
 #include "d3d12_format.h"
+#include "d3d12_query.h"
 #include "d3d12_resource.h"
 #include "d3d12_screen.h"
 
@@ -226,7 +227,7 @@ direct_copy_supported(struct d3d12_screen *screen,
         D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED &&
         (info->src.resource->bind & PIPE_BIND_DEPTH_STENCIL ||
          info->dst.resource->bind & PIPE_BIND_DEPTH_STENCIL)) ||
-        info->src.resource->nr_samples > 1) {
+        info->src.resource->nr_samples != info->dst.resource->nr_samples) {
 
       if (info->dst.box.x != 0 ||
           info->dst.box.y != 0 ||
@@ -335,8 +336,7 @@ copy_subregion_no_barriers(struct d3d12_context *ctx,
                 D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED ||
                 (!util_format_is_depth_or_stencil(dst->base.b.format) &&
                  !util_format_is_depth_or_stencil(src->base.b.format) &&
-                  dst->base.b.nr_samples <= 1 &&
-                  src->base.b.nr_samples <= 1));
+                  dst->base.b.nr_samples == src->base.b.nr_samples));
 
          ctx->cmdlist->CopyTextureRegion(&dst_loc, dstx, dsty, dstz,
                                          &src_loc, NULL);
@@ -354,8 +354,7 @@ copy_subregion_no_barriers(struct d3d12_context *ctx,
                  D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED ||
                  (!util_format_is_depth_or_stencil(dst->base.b.format) &&
                   !util_format_is_depth_or_stencil(src->base.b.format))) &&
-                dst->base.b.nr_samples <= 1 &&
-                src->base.b.nr_samples <= 1);
+                dst->base.b.nr_samples == src->base.b.nr_samples);
 
          ctx->cmdlist->CopyTextureRegion(&dst_loc, dstx, dsty, dstz,
                                          &src_loc, &src_box);
@@ -485,8 +484,8 @@ create_staging_resource(struct d3d12_context *ctx,
    templ.height0 = copy_src.height;
    templ.depth0 = copy_src.depth;
    templ.array_size = 1;
-   templ.nr_samples = 1;
-   templ.nr_storage_samples = 1;
+   templ.nr_samples = src->base.b.nr_samples;
+   templ.nr_storage_samples = src->base.b.nr_storage_samples;
    templ.usage = PIPE_USAGE_STAGING;
    templ.bind = util_format_is_depth_or_stencil(templ.format) ? PIPE_BIND_DEPTH_STENCIL : PIPE_BIND_RENDER_TARGET;
    templ.target = src->base.b.target;
@@ -956,8 +955,7 @@ d3d12_blit(struct pipe_context *pctx,
                  util_format_short_name(info->dst.resource->format));
 
    if (!info->render_condition_enable && ctx->current_predication) {
-      ctx->cmdlist->SetPredication(
-               d3d12_resource_resource(ctx->current_predication), 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+      d3d12_enable_predication(ctx);
       if (D3D12_DEBUG_BLIT & d3d12_debug)
          debug_printf("D3D12 BLIT: Re-enable predication\n");
    }

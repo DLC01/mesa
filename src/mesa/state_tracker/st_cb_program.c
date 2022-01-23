@@ -142,43 +142,6 @@ st_new_ati_fs(struct gl_context *ctx, struct ati_fragment_shader *curProg)
    return prog;
 }
 
-void
-st_max_shader_compiler_threads(struct gl_context *ctx, unsigned count)
-{
-   struct pipe_screen *screen = st_context(ctx)->screen;
-
-   if (screen->set_max_shader_compiler_threads)
-      screen->set_max_shader_compiler_threads(screen, count);
-}
-
-bool
-st_get_shader_program_completion_status(struct gl_context *ctx,
-                                        struct gl_shader_program *shprog)
-{
-   struct pipe_screen *screen = st_context(ctx)->screen;
-
-   if (!screen->is_parallel_shader_compilation_finished)
-      return true;
-
-   for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
-      struct gl_linked_shader *linked = shprog->_LinkedShaders[i];
-      void *sh = NULL;
-
-      if (!linked || !linked->Program)
-         continue;
-
-      if (st_program(linked->Program)->variants)
-         sh = st_program(linked->Program)->variants->driver_shader;
-
-      unsigned type = pipe_shader_type_from_mesa(i);
-
-      if (sh &&
-          !screen->is_parallel_shader_compilation_finished(screen, sh, type))
-         return false;
-   }
-   return true;
-}
-
 /**
  * Plug in the program and shader-related device driver functions.
  */

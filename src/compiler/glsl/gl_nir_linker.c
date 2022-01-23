@@ -22,10 +22,12 @@
  */
 
 #include "nir.h"
+#include "GL/gl.h"
 #include "gl_nir.h"
 #include "gl_nir_linker.h"
 #include "linker_util.h"
-#include "main/mtypes.h"
+#include "main/shader_types.h"
+#include "main/consts_exts.h"
 #include "main/shaderobj.h"
 #include "ir_uniform.h" /* for gl_uniform_storage */
 

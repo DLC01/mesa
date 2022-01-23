@@ -43,11 +43,12 @@ extern "C" {
 enum d3d12_state_var {
    D3D12_STATE_VAR_Y_FLIP = 0,
    D3D12_STATE_VAR_PT_SPRITE,
-   D3D12_STATE_VAR_FIRST_VERTEX,
+   D3D12_STATE_VAR_DRAW_PARAMS,
    D3D12_STATE_VAR_DEPTH_TRANSFORM,
    D3D12_MAX_GRAPHICS_STATE_VARS,
 
    D3D12_STATE_VAR_NUM_WORKGROUPS = 0,
+   D3D12_STATE_VAR_TRANSFORM_GENERIC0,
    D3D12_MAX_COMPUTE_STATE_VARS,
 
    D3D12_MAX_STATE_VARS = MAX2(D3D12_MAX_GRAPHICS_STATE_VARS, D3D12_MAX_COMPUTE_STATE_VARS)
@@ -117,6 +118,7 @@ struct d3d12_shader_key {
       unsigned manual_depth_range : 1;
       unsigned polygon_stipple : 1;
       unsigned remap_front_facing : 1;
+      unsigned multisample_disabled : 1;
    } fs;
 
    struct {

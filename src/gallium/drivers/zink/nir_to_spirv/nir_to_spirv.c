@@ -50,7 +50,7 @@ struct ntv_context {
    SpvId GLSL_std_450;
 
    gl_shader_stage stage;
-   const struct zink_so_info *so_info;
+   const struct zink_shader_info *sinfo;
 
    SpvId ubos[PIPE_MAX_CONSTANT_BUFFERS][5]; //8, 16, 32, unused, 64
    nir_variable *ubo_vars[PIPE_MAX_CONSTANT_BUFFERS];
@@ -67,6 +67,7 @@ struct ntv_context {
    size_t num_entry_ifaces;
 
    SpvId *defs;
+   SpvId *resident_defs;
    size_t num_defs;
 
    SpvId *regs;
@@ -1291,7 +1292,7 @@ get_output_type(struct ntv_context *ctx, unsigned register_index, unsigned num_c
 /* for streamout create new outputs, as streamout can be done on individual components,
    from complete outputs, so we just can't use the created packed outputs */
 static void
-emit_so_info(struct ntv_context *ctx, const struct zink_so_info *so_info,
+emit_so_info(struct ntv_context *ctx, const struct zink_shader_info *so_info,
              unsigned first_so)
 {
    unsigned output = 0;
@@ -1340,7 +1341,7 @@ emit_so_info(struct ntv_context *ctx, const struct zink_so_info *so_info,
 
 static void
 emit_so_outputs(struct ntv_context *ctx,
-                const struct zink_so_info *so_info)
+                const struct zink_shader_info *so_info)
 {
    for (unsigned i = 0; i < so_info->so_info.num_outputs; i++) {
       uint32_t components[NIR_MAX_VEC_COMPONENTS];
@@ -1732,7 +1733,12 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
    BUILTIN_UNOP(nir_op_ufind_msb, GLSLstd450FindUMsb)
    BUILTIN_UNOP(nir_op_find_lsb, GLSLstd450FindILsb)
    BUILTIN_UNOP(nir_op_ifind_msb, GLSLstd450FindSMsb)
-   BUILTIN_UNOPF(nir_op_pack_half_2x16, GLSLstd450PackHalf2x16)
+
+   case nir_op_pack_half_2x16:
+      assert(nir_op_infos[alu->op].num_inputs == 1);
+      result = emit_builtin_unop(ctx, GLSLstd450PackHalf2x16, get_dest_type(ctx, &alu->dest.dest, nir_type_uint), src[0]);
+      break;
+
    BUILTIN_UNOPF(nir_op_unpack_half_2x16, GLSLstd450UnpackHalf2x16)
    BUILTIN_UNOPF(nir_op_pack_64_2x32, GLSLstd450PackDouble2x32)
 #undef BUILTIN_UNOP
@@ -2391,9 +2397,28 @@ emit_image_deref_store(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    spirv_builder_emit_image_write(&ctx->builder, img, coord, texel, 0, sample, 0);
 }
 
+static SpvId
+extract_sparse_load(struct ntv_context *ctx, SpvId result, SpvId dest_type, nir_ssa_def *dest_ssa)
+{
+   /* Result Type must be an OpTypeStruct with two members.
+    * The first member’s type must be an integer type scalar.
+    * It holds a Residency Code that can be passed to OpImageSparseTexelsResident
+    * - OpImageSparseRead spec
+    */
+   uint32_t idx = 0;
+   SpvId resident = spirv_builder_emit_composite_extract(&ctx->builder, spirv_builder_type_uint(&ctx->builder, 32), result, &idx, 1);
+   idx = 1;
+   result = spirv_builder_emit_composite_extract(&ctx->builder, dest_type, result, &idx, 1);
+   assert(resident != 0);
+   assert(dest_ssa->index < ctx->num_defs);
+   ctx->resident_defs[dest_ssa->index] = resident;
+   return result;
+}
+
 static void
 emit_image_deref_load(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 {
+   bool sparse = intr->intrinsic == nir_intrinsic_image_deref_sparse_load;
    SpvId img_var = get_src(ctx, &intr->src[0]);
    nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
    nir_variable *var = deref->deref_type == nir_deref_type_var ? deref->var : get_var_from_image(ctx, img_var);
@@ -2403,9 +2428,12 @@ emit_image_deref_load(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    SpvId img = spirv_builder_emit_load(&ctx->builder, img_type, img_var);
    SpvId coord = get_image_coords(ctx, type, &intr->src[1]);
    SpvId sample = glsl_get_sampler_dim(type) == GLSL_SAMPLER_DIM_MS ? get_src(ctx, &intr->src[2]) : 0;
+   SpvId dest_type = spirv_builder_type_vector(&ctx->builder, base_type, nir_dest_num_components(intr->dest));
    SpvId result = spirv_builder_emit_image_read(&ctx->builder,
-                                 spirv_builder_type_vector(&ctx->builder, base_type, nir_dest_num_components(intr->dest)),
-                                 img, coord, 0, sample, 0);
+                                 dest_type,
+                                 img, coord, 0, sample, 0, sparse);
+   if (sparse)
+      result = extract_sparse_load(ctx, result, dest_type, &intr->dest.ssa);
    store_dest(ctx, &intr->dest, result, nir_type_float);
 }
 
@@ -2500,6 +2528,28 @@ emit_shader_clock(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 }
 
 static void
+emit_is_sparse_texels_resident(struct ntv_context *ctx, nir_intrinsic_instr *intr)
+{
+   spirv_builder_emit_cap(&ctx->builder, SpvCapabilitySparseResidency);
+
+   SpvId type = get_dest_type(ctx, &intr->dest, nir_type_uint);
+
+   /* this will always be stored with the ssa index of the parent instr */
+   assert(intr->src[0].is_ssa);
+   nir_ssa_def *ssa = intr->src[0].ssa;
+   assert(ssa->parent_instr->type == nir_instr_type_alu);
+   nir_alu_instr *alu = nir_instr_as_alu(ssa->parent_instr);
+   assert(alu->src[0].src.is_ssa);
+   unsigned index = alu->src[0].src.ssa->index;
+   assert(index < ctx->num_defs);
+   assert(ctx->resident_defs[index] != 0);
+   SpvId resident = ctx->resident_defs[index];
+
+   SpvId result = spirv_builder_emit_unop(&ctx->builder, SpvOpImageSparseTexelsResident, type, resident);
+   store_dest(ctx, &intr->dest, result, nir_type_uint);
+}
+
+static void
 emit_vote(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 {
    SpvOp op;
@@ -2590,8 +2640,8 @@ emit_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
       /* geometry shader emits copied xfb outputs just prior to EmitVertex(),
        * since that's the end of the shader
        */
-      if (ctx->so_info)
-         emit_so_outputs(ctx, ctx->so_info);
+      if (ctx->sinfo)
+         emit_so_outputs(ctx, ctx->sinfo);
       spirv_builder_emit_vertex(&ctx->builder, nir_intrinsic_stream_id(intr));
       break;
 
@@ -2625,7 +2675,7 @@ emit_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    case nir_intrinsic_memory_barrier:
       spirv_builder_emit_memory_barrier(&ctx->builder, SpvScopeWorkgroup,
                                         SpvMemorySemanticsImageMemoryMask | SpvMemorySemanticsUniformMemoryMask |
-                                        SpvMemorySemanticsMakeVisibleMask  | SpvMemorySemanticsAcquireReleaseMask);
+                                        SpvMemorySemanticsAcquireReleaseMask);
       break;
 
    case nir_intrinsic_memory_barrier_image:
@@ -2703,6 +2753,7 @@ emit_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
       emit_image_deref_store(ctx, intr);
       break;
 
+   case nir_intrinsic_image_deref_sparse_load:
    case nir_intrinsic_image_deref_load:
       emit_image_deref_load(ctx, intr);
       break;
@@ -2797,6 +2848,10 @@ emit_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
       emit_vote(ctx, intr);
       break;
 
+   case nir_intrinsic_is_sparse_texels_resident:
+      emit_is_sparse_texels_resident(ctx, intr);
+      break;
+
    default:
       fprintf(stderr, "emit_intrinsic: not implemented (%s)\n",
               nir_intrinsic_infos[intr->intrinsic].name);
@@ -2863,7 +2918,7 @@ emit_tex(struct ntv_context *ctx, nir_tex_instr *tex)
    assert(tex->texture_index == tex->sampler_index);
 
    SpvId coord = 0, proj = 0, bias = 0, lod = 0, dref = 0, dx = 0, dy = 0,
-         const_offset = 0, offset = 0, sample = 0, tex_offset = 0, bindless = 0;
+         const_offset = 0, offset = 0, sample = 0, tex_offset = 0, bindless = 0, min_lod = 0;
    unsigned coord_components = 0;
    nir_variable *bindless_var = NULL;
    for (unsigned i = 0; i < tex->num_srcs; i++) {
@@ -2912,6 +2967,12 @@ emit_tex(struct ntv_context *ctx, nir_tex_instr *tex)
          assert(tex->op == nir_texop_txb);
          bias = get_src_float(ctx, &tex->src[i].src);
          assert(bias != 0);
+         break;
+
+      case nir_tex_src_min_lod:
+         assert(nir_src_num_components(tex->src[i].src) == 1);
+         min_lod = get_src_float(ctx, &tex->src[i].src);
+         assert(min_lod != 0);
          break;
 
       case nir_tex_src_lod:
@@ -2996,6 +3057,8 @@ emit_tex(struct ntv_context *ctx, nir_tex_instr *tex)
    }
    SpvId load = spirv_builder_emit_load(&ctx->builder, sampled_type, sampler_id);
 
+   if (tex->is_sparse)
+      tex->dest.ssa.num_components--;
    SpvId dest_type = get_dest_type(ctx, &tex->dest, tex->dest_type);
 
    if (!tex_instr_is_lod_allowed(tex))
@@ -3091,6 +3154,8 @@ emit_tex(struct ntv_context *ctx, nir_tex_instr *tex)
    SpvId result;
    if (offset)
       spirv_builder_emit_cap(&ctx->builder, SpvCapabilityImageGatherExtended);
+   if (min_lod)
+      spirv_builder_emit_cap(&ctx->builder, SpvCapabilityMinLod);
    if (tex->op == nir_texop_txf ||
        tex->op == nir_texop_txf_ms ||
        tex->op == nir_texop_tg4) {
@@ -3099,24 +3164,27 @@ emit_tex(struct ntv_context *ctx, nir_tex_instr *tex)
       if (tex->op == nir_texop_tg4) {
          if (const_offset)
             spirv_builder_emit_cap(&ctx->builder, SpvCapabilityImageGatherExtended);
+         actual_dest_type = dest_type;
          result = spirv_builder_emit_image_gather(&ctx->builder, dest_type,
                                                  load, coord, emit_uint_const(ctx, 32, tex->component),
-                                                 lod, sample, const_offset, offset, dref);
+                                                 lod, sample, const_offset, offset, dref, tex->is_sparse);
       } else
          result = spirv_builder_emit_image_fetch(&ctx->builder, actual_dest_type,
-                                                 image, coord, lod, sample, const_offset, offset);
+                                                 image, coord, lod, sample, const_offset, offset, tex->is_sparse);
    } else {
       result = spirv_builder_emit_image_sample(&ctx->builder,
                                                actual_dest_type, load,
                                                coord,
                                                proj != 0,
                                                lod, bias, dref, dx, dy,
-                                               const_offset, offset);
+                                               const_offset, offset, min_lod, tex->is_sparse);
    }
 
    spirv_builder_emit_decoration(&ctx->builder, result,
                                  SpvDecorationRelaxedPrecision);
 
+   if (tex->is_sparse)
+      result = extract_sparse_load(ctx, result, actual_dest_type, &tex->dest.ssa);
    if (dref && nir_dest_num_components(tex->dest) > 1 && tex->op != nir_texop_tg4) {
       SpvId components[4] = { result, result, result, result };
       result = spirv_builder_emit_composite_construct(&ctx->builder,
@@ -3131,6 +3199,8 @@ emit_tex(struct ntv_context *ctx, nir_tex_instr *tex)
    }
 
    store_dest(ctx, &tex->dest, result, tex->dest_type);
+   if (tex->is_sparse)
+      tex->dest.ssa.num_components++;
 }
 
 static void
@@ -3431,35 +3501,33 @@ emit_cf_list(struct ntv_context *ctx, struct exec_list *list)
 }
 
 static SpvExecutionMode
-get_input_prim_type_mode(uint16_t type)
+get_input_prim_type_mode(enum shader_prim type)
 {
    switch (type) {
-   case GL_POINTS:
+   case SHADER_PRIM_POINTS:
       return SpvExecutionModeInputPoints;
-   case GL_LINES:
-   case GL_LINE_LOOP:
-   case GL_LINE_STRIP:
+   case SHADER_PRIM_LINES:
+   case SHADER_PRIM_LINE_LOOP:
+   case SHADER_PRIM_LINE_STRIP:
       return SpvExecutionModeInputLines;
-   case GL_TRIANGLE_STRIP:
-   case GL_TRIANGLES:
-   case GL_TRIANGLE_FAN:
+   case SHADER_PRIM_TRIANGLE_STRIP:
+   case SHADER_PRIM_TRIANGLES:
+   case SHADER_PRIM_TRIANGLE_FAN:
       return SpvExecutionModeTriangles;
-   case GL_QUADS:
-   case GL_QUAD_STRIP:
+   case SHADER_PRIM_QUADS:
+   case SHADER_PRIM_QUAD_STRIP:
       return SpvExecutionModeQuads;
       break;
-   case GL_POLYGON:
+   case SHADER_PRIM_POLYGON:
       unreachable("handle polygons in gs");
       break;
-   case GL_LINES_ADJACENCY:
-   case GL_LINE_STRIP_ADJACENCY:
+   case SHADER_PRIM_LINES_ADJACENCY:
+   case SHADER_PRIM_LINE_STRIP_ADJACENCY:
       return SpvExecutionModeInputLinesAdjacency;
-   case GL_TRIANGLES_ADJACENCY:
-   case GL_TRIANGLE_STRIP_ADJACENCY:
+   case SHADER_PRIM_TRIANGLES_ADJACENCY:
+   case SHADER_PRIM_TRIANGLE_STRIP_ADJACENCY:
       return SpvExecutionModeInputTrianglesAdjacency;
       break;
-   case GL_ISOLINES:
-      return SpvExecutionModeIsolines;
    default:
       debug_printf("unknown geometry shader input mode %u\n", type);
       unreachable("error!");
@@ -3469,38 +3537,36 @@ get_input_prim_type_mode(uint16_t type)
    return 0;
 }
 static SpvExecutionMode
-get_output_prim_type_mode(uint16_t type)
+get_output_prim_type_mode(enum shader_prim type)
 {
    switch (type) {
-   case GL_POINTS:
+   case SHADER_PRIM_POINTS:
       return SpvExecutionModeOutputPoints;
-   case GL_LINES:
-   case GL_LINE_LOOP:
-      unreachable("GL_LINES/LINE_LOOP passed as gs output");
+   case SHADER_PRIM_LINES:
+   case SHADER_PRIM_LINE_LOOP:
+      unreachable("SHADER_PRIM_LINES/LINE_LOOP passed as gs output");
       break;
-   case GL_LINE_STRIP:
+   case SHADER_PRIM_LINE_STRIP:
       return SpvExecutionModeOutputLineStrip;
-   case GL_TRIANGLE_STRIP:
+   case SHADER_PRIM_TRIANGLE_STRIP:
       return SpvExecutionModeOutputTriangleStrip;
-   case GL_TRIANGLES:
-   case GL_TRIANGLE_FAN: //FIXME: not sure if right for output
+   case SHADER_PRIM_TRIANGLES:
+   case SHADER_PRIM_TRIANGLE_FAN: //FIXME: not sure if right for output
       return SpvExecutionModeTriangles;
-   case GL_QUADS:
-   case GL_QUAD_STRIP:
+   case SHADER_PRIM_QUADS:
+   case SHADER_PRIM_QUAD_STRIP:
       return SpvExecutionModeQuads;
-   case GL_POLYGON:
+   case SHADER_PRIM_POLYGON:
       unreachable("handle polygons in gs");
       break;
-   case GL_LINES_ADJACENCY:
-   case GL_LINE_STRIP_ADJACENCY:
+   case SHADER_PRIM_LINES_ADJACENCY:
+   case SHADER_PRIM_LINE_STRIP_ADJACENCY:
       unreachable("handle line adjacency in gs");
       break;
-   case GL_TRIANGLES_ADJACENCY:
-   case GL_TRIANGLE_STRIP_ADJACENCY:
+   case SHADER_PRIM_TRIANGLES_ADJACENCY:
+   case SHADER_PRIM_TRIANGLE_STRIP_ADJACENCY:
       unreachable("handle triangle adjacency in gs");
       break;
-   case GL_ISOLINES:
-      return SpvExecutionModeIsolines;
    default:
       debug_printf("unknown geometry shader output mode %u\n", type);
       unreachable("error!");
@@ -3529,12 +3595,12 @@ get_depth_layout_mode(enum gl_frag_depth_layout depth_layout)
 }
 
 static SpvExecutionMode
-get_primitive_mode(uint16_t primitive_mode)
+get_primitive_mode(enum tess_primitive_mode primitive_mode)
 {
    switch (primitive_mode) {
-   case GL_TRIANGLES: return SpvExecutionModeTriangles;
-   case GL_QUADS: return SpvExecutionModeQuads;
-   case GL_ISOLINES: return SpvExecutionModeIsolines;
+   case TESS_PRIMITIVE_TRIANGLES: return SpvExecutionModeTriangles;
+   case TESS_PRIMITIVE_QUADS: return SpvExecutionModeQuads;
+   case TESS_PRIMITIVE_ISOLINES: return SpvExecutionModeIsolines;
    default:
       unreachable("unknown tess prim type!");
    }
@@ -3556,7 +3622,7 @@ get_spacing(enum gl_tess_spacing spacing)
 }
 
 struct spirv_shader *
-nir_to_spirv(struct nir_shader *s, const struct zink_so_info *so_info, uint32_t spirv_version)
+nir_to_spirv(struct nir_shader *s, const struct zink_shader_info *sinfo, uint32_t spirv_version)
 {
    struct spirv_shader *ret = NULL;
 
@@ -3647,7 +3713,7 @@ nir_to_spirv(struct nir_shader *s, const struct zink_so_info *so_info, uint32_t 
    }
 
    ctx.stage = s->info.stage;
-   ctx.so_info = so_info;
+   ctx.sinfo = sinfo;
    ctx.GLSL_std_450 = spirv_builder_import(&ctx.builder, "GLSL.std.450");
    ctx.explicit_lod = true;
    spirv_builder_emit_source(&ctx.builder, SpvSourceLanguageUnknown, 0);
@@ -3728,8 +3794,8 @@ nir_to_spirv(struct nir_shader *s, const struct zink_so_info *so_info, uint32_t 
    }
 
 
-   if (so_info)
-      emit_so_info(&ctx, so_info, max_output + 1);
+   if (sinfo->last_vertex)
+      emit_so_info(&ctx, sinfo, max_output + 1);
 
    /* we have to reverse iterate to match what's done in zink_compiler.c */
    foreach_list_typed_reverse(nir_variable, var, node, &s->variables)
@@ -3781,7 +3847,7 @@ nir_to_spirv(struct nir_shader *s, const struct zink_so_info *so_info, uint32_t 
       break;
    case MESA_SHADER_TESS_EVAL:
       spirv_builder_emit_exec_mode(&ctx.builder, entry_point,
-                                   get_primitive_mode(s->info.tess.primitive_mode));
+                                   get_primitive_mode(s->info.tess._primitive_mode));
       spirv_builder_emit_exec_mode(&ctx.builder, entry_point,
                                    s->info.tess.ccw ? SpvExecutionModeVertexOrderCcw
                                                     : SpvExecutionModeVertexOrderCw);
@@ -3848,6 +3914,16 @@ nir_to_spirv(struct nir_shader *s, const struct zink_so_info *so_info, uint32_t 
                                 sizeof(SpvId), entry->ssa_alloc);
    if (!ctx.defs)
       goto fail;
+   if (sinfo->have_sparse) {
+      spirv_builder_emit_cap(&ctx.builder, SpvCapabilitySparseResidency);
+      /* this could be huge, so only alloc if needed since it's extremely unlikely to
+       * ever be used by anything except cts
+       */
+      ctx.resident_defs = ralloc_array_size(ctx.mem_ctx,
+                                            sizeof(SpvId), entry->ssa_alloc);
+      if (!ctx.resident_defs)
+         goto fail;
+   }
    ctx.num_defs = entry->ssa_alloc;
 
    nir_index_local_regs(entry);
@@ -3884,8 +3960,8 @@ nir_to_spirv(struct nir_shader *s, const struct zink_so_info *so_info, uint32_t 
    emit_cf_list(&ctx, &entry->body);
 
    /* vertex/tess shader emits copied xfb outputs at the end of the shader */
-   if (so_info && (ctx.stage == MESA_SHADER_VERTEX || ctx.stage == MESA_SHADER_TESS_EVAL))
-      emit_so_outputs(&ctx, so_info);
+   if (sinfo->last_vertex && (ctx.stage == MESA_SHADER_VERTEX || ctx.stage == MESA_SHADER_TESS_EVAL))
+      emit_so_outputs(&ctx, sinfo);
 
    spirv_builder_return(&ctx.builder); // doesn't belong here, but whatevz
    spirv_builder_function_end(&ctx.builder);

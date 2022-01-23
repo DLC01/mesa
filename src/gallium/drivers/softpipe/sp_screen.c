@@ -139,6 +139,7 @@ softpipe_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS:
       return SP_MAX_TEXTURE_CUBE_LEVELS;
    case PIPE_CAP_BLEND_EQUATION_SEPARATE:
+   case PIPE_CAP_RGB_OVERRIDE_DST_ALPHA_BLEND:
       return 1;
    case PIPE_CAP_INDEP_BLEND_ENABLE:
       return 1;
@@ -306,6 +307,8 @@ softpipe_get_param(struct pipe_screen *screen, enum pipe_cap param)
       return 1 << 27;
    case PIPE_CAP_SHADER_BUFFER_OFFSET_ALIGNMENT:
       return 4;
+   case PIPE_CAP_IMAGE_STORE_FORMATTED:
+      return 1;
    default:
       return u_pipe_screen_get_param_defaults(screen, param);
    }

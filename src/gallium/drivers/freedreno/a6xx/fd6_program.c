@@ -765,7 +765,7 @@ setup_stateobj(struct fd_ringbuffer *ring, struct fd_context *ctx,
       uint32_t output;
       if (ds_info->tess.point_mode)
          output = TESS_POINTS;
-      else if (ds_info->tess.primitive_mode == GL_ISOLINES)
+      else if (ds_info->tess._primitive_mode == TESS_PRIMITIVE_ISOLINES)
          output = TESS_LINES;
       else if (ds_info->tess.ccw)
          output = TESS_CCW_TRIS;
@@ -1004,13 +1004,13 @@ setup_stateobj(struct fd_ringbuffer *ring, struct fd_context *ctx,
 
       uint32_t output;
       switch (gs->shader->nir->info.gs.output_primitive) {
-      case GL_POINTS:
+      case SHADER_PRIM_POINTS:
          output = TESS_POINTS;
          break;
-      case GL_LINE_STRIP:
+      case SHADER_PRIM_LINE_STRIP:
          output = TESS_LINES;
          break;
-      case GL_TRIANGLE_STRIP:
+      case SHADER_PRIM_TRIANGLE_STRIP:
          output = TESS_CW_TRIS;
          break;
       default:

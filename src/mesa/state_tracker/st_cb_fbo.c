@@ -59,7 +59,7 @@
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
 #include "util/u_surface.h"
-
+#include "util/u_memory.h"
 
 static GLboolean
 st_renderbuffer_alloc_sw_storage(struct gl_context * ctx,
@@ -303,7 +303,7 @@ st_renderbuffer_delete(struct gl_context *ctx, struct gl_renderbuffer *rb)
 struct gl_renderbuffer *
 st_new_renderbuffer(struct gl_context *ctx, GLuint name)
 {
-   struct st_renderbuffer *strb = ST_CALLOC_STRUCT(st_renderbuffer);
+   struct st_renderbuffer *strb = CALLOC_STRUCT(st_renderbuffer);
    if (strb) {
       assert(name != 0);
       _mesa_init_renderbuffer(&strb->Base, name);
@@ -324,7 +324,7 @@ st_new_renderbuffer_fb(enum pipe_format format, unsigned samples, boolean sw)
 {
    struct st_renderbuffer *strb;
 
-   strb = ST_CALLOC_STRUCT(st_renderbuffer);
+   strb = CALLOC_STRUCT(st_renderbuffer);
    if (!strb) {
       _mesa_error(NULL, GL_OUT_OF_MEMORY, "creating renderbuffer");
       return NULL;
@@ -433,7 +433,7 @@ st_new_renderbuffer_fb(enum pipe_format format, unsigned samples, boolean sw)
       _mesa_problem(NULL,
                     "Unexpected format %s in st_new_renderbuffer_fb",
                     util_format_name(format));
-      free(strb);
+      FREE(strb);
       return NULL;
    }
 
@@ -484,7 +484,7 @@ st_update_renderbuffer_surface(struct st_context *st,
 {
    struct pipe_context *pipe = st->pipe;
    struct pipe_resource *resource = strb->texture;
-   const struct st_texture_object *stTexObj = NULL;
+   const struct gl_texture_object *stTexObj = NULL;
    unsigned rtt_width = strb->Base.Width;
    unsigned rtt_height = strb->Base.Height;
    unsigned rtt_depth = strb->Base.Depth;
@@ -500,7 +500,7 @@ st_update_renderbuffer_surface(struct st_context *st,
    enum pipe_format format = resource->format;
 
    if (strb->is_rtt) {
-      stTexObj = st_texture_object(strb->Base.TexImage->TexObject);
+      stTexObj = strb->Base.TexImage->TexObject;
       if (stTexObj->surface_based)
          format = stTexObj->surface_format;
    }
@@ -537,8 +537,8 @@ st_update_renderbuffer_surface(struct st_context *st,
 
    /* Adjust for texture views */
    if (strb->is_rtt && resource->array_size > 1 &&
-       stTexObj->base.Immutable) {
-      const struct gl_texture_object *tex = &stTexObj->base;
+       stTexObj->Immutable) {
+      const struct gl_texture_object *tex = stTexObj;
       first_layer += tex->Attrib.MinLayer;
       if (!strb->rtt_layered)
          last_layer += tex->Attrib.MinLayer;
@@ -587,8 +587,8 @@ static struct pipe_resource *
 get_teximage_resource(struct gl_texture_object *texObj,
                       unsigned face, unsigned level)
 {
-   struct st_texture_image *stImg =
-      st_texture_image(texObj->Image[face][level]);
+   struct gl_texture_image *stImg =
+      texObj->Image[face][level];
 
    return stImg->pt;
 }
@@ -675,7 +675,7 @@ st_validate_attachment(struct gl_context *ctx,
                        const struct gl_renderbuffer_attachment *att,
                        unsigned bindings)
 {
-   const struct st_texture_object *stObj = st_texture_object(att->Texture);
+   const struct gl_texture_object *stObj = att->Texture;
    enum pipe_format format;
    mesa_format texFormat;
    GLboolean valid;
@@ -973,18 +973,4 @@ st_UnmapRenderbuffer(struct gl_context *ctx,
 
    pipe_texture_unmap(pipe, strb->transfer);
    strb->transfer = NULL;
-}
-
-
-/**
- * Called via ctx->Driver.EvaluateDepthValues.
- */
-void
-st_EvaluateDepthValues(struct gl_context *ctx)
-{
-   struct st_context *st = st_context(ctx);
-
-   st_validate_state(st, ST_PIPELINE_UPDATE_FRAMEBUFFER);
-
-   st->pipe->evaluate_depth_buffer(st->pipe);
 }

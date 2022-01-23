@@ -919,34 +919,7 @@ update_existing_vbo(struct zink_context *ctx, unsigned slot)
       return;
    struct zink_resource *res = zink_resource(ctx->vertex_buffers[slot].buffer.resource);
    res->vbo_bind_mask &= ~BITFIELD_BIT(slot);
-   ctx->vbufs[slot] = VK_NULL_HANDLE;
-   ctx->vbuf_offsets[slot] = 0;
    update_res_bind_count(ctx, res, false, true);
-}
-
-ALWAYS_INLINE static struct zink_resource *
-set_vertex_buffer_clamped(struct zink_context *ctx, unsigned slot)
-{
-   const struct pipe_vertex_buffer *ctx_vb = &ctx->vertex_buffers[slot];
-   struct zink_resource *res = zink_resource(ctx_vb->buffer.resource);
-   struct zink_screen *screen = zink_screen(ctx->base.screen);
-   if (ctx_vb->buffer_offset > screen->info.props.limits.maxVertexInputAttributeOffset) {
-      /* buffer offset exceeds maximum: make a tmp buffer at this offset */
-      ctx->vbufs[slot] = zink_resource_tmp_buffer(screen, res, ctx_vb->buffer_offset, 0, &ctx->vbuf_offsets[slot]);
-      util_dynarray_append(&res->obj->tmp, VkBuffer, ctx->vbufs[slot]);
-      /* the driver is broken and sets a min alignment that's larger than its max offset: rebind as staging buffer */
-      if (unlikely(ctx->vbuf_offsets[slot] > screen->info.props.limits.maxVertexInputAttributeOffset)) {
-         static bool warned = false;
-         if (!warned)
-            debug_printf("zink: this vulkan driver is BROKEN! maxVertexInputAttributeOffset < VkMemoryRequirements::alignment\n");
-         warned = true;
-      }
-   } else {
-      ctx->vbufs[slot] = res->obj->buffer;
-      ctx->vbuf_offsets[slot] = ctx_vb->buffer_offset;
-   }
-   assert(ctx->vbufs[slot]);
-   return res;
 }
 
 static void
@@ -986,9 +959,9 @@ zink_set_vertex_buffers(struct pipe_context *pctx,
             /* always barrier before possible rebind */
             zink_resource_buffer_barrier(ctx, res, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
                                          VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
-            set_vertex_buffer_clamped(ctx, start_slot + i);
-         } else
+         } else {
             enabled_buffers &= ~BITFIELD_BIT(i);
+         }
       }
    } else {
       if (need_state_change)
@@ -3344,10 +3317,11 @@ zink_flush_resource(struct pipe_context *pctx,
                     struct pipe_resource *pres)
 {
    struct zink_context *ctx = zink_context(pctx);
+   struct zink_resource *res = zink_resource(pres);
    /* TODO: this is not futureproof and should be updated once proper
     * WSI support is added
     */
-   if (pres->bind & (PIPE_BIND_SHARED | PIPE_BIND_SCANOUT))
+   if (res->scanout_obj && (pres->bind & (PIPE_BIND_SHARED | PIPE_BIND_SCANOUT)))
       pipe_resource_reference(&ctx->batch.state->flush_res, pres);
 }
 
@@ -3806,7 +3780,6 @@ rebind_buffer(struct zink_context *ctx, struct zink_resource *res, uint32_t rebi
       u_foreach_bit(slot, res->vbo_bind_mask) {
          if (ctx->vertex_buffers[slot].buffer.resource != &res->base.b) //wrong context
             goto end;
-         set_vertex_buffer_clamped(ctx, slot);
          num_rebinds++;
       }
       rebind_mask &= ~BITFIELD_BIT(TC_BINDING_VERTEX_BUFFER);
@@ -3896,7 +3869,7 @@ zink_resource_commit(struct pipe_context *pctx, struct pipe_resource *pres, unsi
    if (zink_resource_has_unflushed_usage(res))
       zink_flush_queue(ctx);
 
-   bool ret = zink_bo_commit(screen, res, box->x, box->width, commit);
+   bool ret = zink_bo_commit(screen, res, level, box, commit);
    if (!ret)
       check_device_lost(ctx);
 
@@ -3950,8 +3923,6 @@ void
 zink_rebind_all_buffers(struct zink_context *ctx)
 {
    struct zink_batch *batch = &ctx->batch;
-   u_foreach_bit(slot, ctx->gfx_pipeline_state.vertex_buffers_enabled_mask)
-      set_vertex_buffer_clamped(ctx, slot);
    ctx->vertex_buffers_dirty = ctx->gfx_pipeline_state.vertex_buffers_enabled_mask > 0;
    ctx->dirty_so_targets = ctx->num_so_targets > 0;
    if (ctx->num_so_targets)
@@ -4115,7 +4086,9 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.clear_render_target = zink_clear_render_target;
    ctx->base.clear_depth_stencil = zink_clear_depth_stencil;
 
+   ctx->base.create_fence_fd = zink_create_fence_fd;
    ctx->base.fence_server_sync = zink_fence_server_sync;
+   ctx->base.fence_server_signal = zink_fence_server_signal;
    ctx->base.flush = zink_flush;
    ctx->base.memory_barrier = zink_memory_barrier;
    ctx->base.texture_barrier = zink_texture_barrier;

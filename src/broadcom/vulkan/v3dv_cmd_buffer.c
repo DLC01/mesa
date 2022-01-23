@@ -441,8 +441,22 @@ job_compute_frame_tiling(struct v3dv_job *job,
    tiling->msaa = msaa;
    tiling->internal_bpp = max_internal_bpp;
 
-   v3d_choose_tile_size(render_target_count, max_internal_bpp, msaa,
-                         &tiling->tile_width, &tiling->tile_height);
+   /* We can use double-buffer when MSAA is disabled to reduce tile store
+    * overhead.
+    *
+    * FIXME: if we are emitting any tile loads the hardware will serialize
+    * loads and stores across tiles effectivley disabling double buffering,
+    * so we would want to check for that and not enable it in that case to
+    * avoid reducing the tile size.
+    */
+   tiling->double_buffer =
+      unlikely(V3D_DEBUG & V3D_DEBUG_DOUBLE_BUFFER) && !msaa;
+
+   assert(!tiling->msaa || !tiling->double_buffer);
+
+   v3d_choose_tile_size(render_target_count, max_internal_bpp,
+                        tiling->msaa, tiling->double_buffer,
+                        &tiling->tile_width, &tiling->tile_height);
 
    tiling->draw_tiles_x = DIV_ROUND_UP(width, tiling->tile_width);
    tiling->draw_tiles_y = DIV_ROUND_UP(height, tiling->tile_height);
@@ -673,8 +687,8 @@ v3dv_cmd_buffer_finish_job(struct v3dv_cmd_buffer *cmd_buffer)
    }
 }
 
-static bool
-job_type_is_gpu(struct v3dv_job *job)
+bool
+v3dv_job_type_is_gpu(struct v3dv_job *job)
 {
    switch (job->type) {
    case V3DV_JOB_TYPE_GPU_CL:
@@ -699,7 +713,7 @@ cmd_buffer_serialize_job_if_needed(struct v3dv_cmd_buffer *cmd_buffer,
    /* Serialization only affects GPU jobs, CPU jobs are always automatically
     * serialized.
     */
-   if (!job_type_is_gpu(job))
+   if (!v3dv_job_type_is_gpu(job))
       return;
 
    job->serialize = true;

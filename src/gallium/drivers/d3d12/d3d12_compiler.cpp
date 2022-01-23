@@ -170,16 +170,20 @@ compile_nir(struct d3d12_context *ctx, struct d3d12_shader_selector *sel,
       NIR_PASS_V(nir, d3d12_lower_yflip);
    }
    NIR_PASS_V(nir, nir_lower_packed_ubo_loads);
-   NIR_PASS_V(nir, d3d12_lower_load_first_vertex);
+   NIR_PASS_V(nir, d3d12_lower_load_draw_params);
    NIR_PASS_V(nir, d3d12_lower_state_vars, shader);
    NIR_PASS_V(nir, dxil_nir_lower_bool_input);
    NIR_PASS_V(nir, dxil_nir_lower_loads_stores_to_dxil);
    NIR_PASS_V(nir, dxil_nir_lower_atomics_to_dxil);
 
+   if (key->fs.multisample_disabled)
+      NIR_PASS_V(nir, d3d12_disable_multisampling);
+
    struct nir_to_dxil_options opts = {};
    opts.interpolate_at_vertex = screen->have_load_at_vertex;
    opts.lower_int16 = !screen->opts4.Native16BitShaderOpsSupported;
-   opts.ubo_binding_offset = shader->has_default_ubo0 ? 0 : 1;
+   opts.no_ubo0 = !shader->has_default_ubo0;
+   opts.last_ubo_is_not_arrayed = shader->num_state_vars > 0;
    opts.provoking_vertex = key->fs.provoking_vertex;
    opts.environment = DXIL_ENVIRONMENT_GL;
 
@@ -216,7 +220,7 @@ compile_nir(struct d3d12_context *ctx, struct d3d12_shader_selector *sel,
    if(nir->info.num_ubos) {
       // Ignore state_vars ubo as it is bound as root constants
       unsigned num_ubo_bindings = nir->info.num_ubos - (shader->state_vars_used ? 1 : 0);
-      for(unsigned i = opts.ubo_binding_offset; i < num_ubo_bindings; ++i) {
+      for(unsigned i = shader->has_default_ubo0 ? 0 : 1; i < num_ubo_bindings; ++i) {
          shader->cb_bindings[shader->num_cb_bindings++].binding = i;
       }
    }
@@ -372,6 +376,19 @@ fill_mode_lowered(struct d3d12_context *ctx, const struct pipe_draw_info *dinfo)
 }
 
 static bool
+has_stream_out_for_streams(struct d3d12_context *ctx)
+{
+   unsigned mask = ctx->gfx_stages[PIPE_SHADER_GEOMETRY]->initial->info.gs.active_stream_mask & ~1;
+   for (unsigned i = 0; i < ctx->gfx_pipeline_state.so_info.num_outputs; ++i) {
+      unsigned stream = ctx->gfx_pipeline_state.so_info.output[i].stream;
+      if (((1 << stream) & mask) &&
+         ctx->so_buffer_views[stream].SizeInBytes)
+         return true;
+   }
+   return false;
+}
+
+static bool
 needs_point_sprite_lowering(struct d3d12_context *ctx, const struct pipe_draw_info *dinfo)
 {
    struct d3d12_shader_selector *vs = ctx->gfx_stages[PIPE_SHADER_VERTEX];
@@ -380,7 +397,10 @@ needs_point_sprite_lowering(struct d3d12_context *ctx, const struct pipe_draw_in
    if (gs != NULL && !gs->is_gs_variant) {
       /* There is an user GS; Check if it outputs points with PSIZE */
       return (gs->initial->info.gs.output_primitive == GL_POINTS &&
-              gs->initial->info.outputs_written & VARYING_BIT_PSIZ);
+              (gs->initial->info.outputs_written & VARYING_BIT_PSIZ ||
+                 ctx->gfx_pipeline_state.rast->base.point_size > 1.0) &&
+              (gs->initial->info.gs.active_stream_mask == 1 ||
+                 !has_stream_out_for_streams(ctx)));
    } else {
       /* No user GS; check if we are drawing wide points */
       return ((dinfo->mode == PIPE_PRIM_POINTS ||
@@ -619,7 +639,10 @@ d3d12_compare_shader_keys(const d3d12_shader_key *expect, const d3d12_shader_key
           expect->fs.manual_depth_range != have->fs.manual_depth_range ||
           expect->fs.polygon_stipple != have->fs.polygon_stipple ||
           expect->fs.cast_to_uint != have->fs.cast_to_uint ||
-          expect->fs.cast_to_int != have->fs.cast_to_int)
+          expect->fs.cast_to_int != have->fs.cast_to_int ||
+          expect->fs.remap_front_facing != have->fs.remap_front_facing ||
+          expect->fs.missing_dual_src_outputs != have->fs.missing_dual_src_outputs ||
+          expect->fs.multisample_disabled != have->fs.multisample_disabled)
          return false;
    } else if (expect->stage == PIPE_SHADER_COMPUTE) {
       if (memcmp(expect->cs.workgroup_size, have->cs.workgroup_size,
@@ -760,6 +783,8 @@ d3d12_fill_shader_key(struct d3d12_selection_context *sel_ctx,
       key->fs.frag_result_color_lowering = sel_ctx->frag_result_color_lowering;
       key->fs.manual_depth_range = sel_ctx->manual_depth_range;
       key->fs.polygon_stipple = sel_ctx->ctx->pstipple.enabled;
+      key->fs.multisample_disabled = sel_ctx->ctx->gfx_pipeline_state.rast &&
+         !sel_ctx->ctx->gfx_pipeline_state.rast->desc.MultisampleEnable;
       if (sel_ctx->ctx->gfx_pipeline_state.blend &&
           sel_ctx->ctx->gfx_pipeline_state.blend->desc.RenderTarget[0].LogicOpEnable &&
           !sel_ctx->ctx->gfx_pipeline_state.has_float_rtv) {
@@ -1141,7 +1166,7 @@ d3d12_create_shader(struct d3d12_context *ctx,
                          0 : VARYING_BIT_PRIMITIVE_ID;
 
    uint64_t out_mask = nir->info.stage == MESA_SHADER_FRAGMENT ?
-                          (1ull << FRAG_RESULT_STENCIL) :
+                          (1ull << FRAG_RESULT_STENCIL) | (1ull << FRAG_RESULT_SAMPLE_MASK) :
                           VARYING_BIT_PRIMITIVE_ID;
 
    d3d12_fix_io_uint_type(nir, in_mask, out_mask);
@@ -1160,6 +1185,7 @@ d3d12_create_shader(struct d3d12_context *ctx,
                                             next ? next->current->nir->info.inputs_read : 0);
    } else {
       NIR_PASS_V(nir, nir_lower_fragcoord_wtrans);
+      NIR_PASS_V(nir, d3d12_lower_sample_pos);
       dxil_sort_ps_outputs(nir);
    }
 

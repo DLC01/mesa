@@ -65,6 +65,7 @@ EXTENSIONS = [
     Extension("VK_KHR_maintenance3"),
     Extension("VK_KHR_external_memory"),
     Extension("VK_KHR_external_memory_fd"),
+    Extension("VK_KHR_external_semaphore_fd"),
     Extension("VK_EXT_external_memory_dma_buf"),
     Extension("VK_EXT_queue_family_foreign"),
     Extension("VK_EXT_provoking_vertex",
@@ -115,6 +116,8 @@ EXTENSIONS = [
         alias="index_uint8",
         features=True,
         conditions=["$feats.indexTypeUint8"]),
+    Extension("VK_KHR_image_format_list"),
+    Extension("VK_KHR_sampler_ycbcr_conversion"),
     Extension("VK_KHR_imageless_framebuffer",
         alias="imgless",
         features=True,
@@ -285,6 +288,7 @@ struct zink_device_info {
 %endfor
 
    VkPhysicalDeviceMemoryProperties mem_props;
+   VkPhysicalDeviceIDProperties deviceid_props;
 
 %for ext in extensions:
 <%helpers:guard ext="${ext}">
@@ -432,6 +436,12 @@ zink_get_physical_device_info(struct zink_screen *screen)
 </%helpers:guard>
 %endif
 %endfor
+
+      if (screen->vk_version < VK_MAKE_VERSION(1,2,0) && screen->instance_info.have_KHR_external_memory_capabilities) {
+         info->deviceid_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+         info->deviceid_props.pNext = props.pNext;
+         props.pNext = &info->deviceid_props;
+      }
 
       // note: setting up local VkPhysicalDeviceProperties2.
       screen->vk.GetPhysicalDeviceProperties2(screen->pdev, &props);

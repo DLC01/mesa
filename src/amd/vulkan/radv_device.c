@@ -724,6 +724,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    device->cs_wave_size = 64;
    device->ps_wave_size = 64;
    device->ge_wave_size = 64;
+   device->rt_wave_size = 64;
 
    if (device->rad_info.chip_class >= GFX10) {
       if (device->instance->perftest_flags & RADV_PERFTEST_CS_WAVE_32)
@@ -735,6 +736,9 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
       if (device->instance->perftest_flags & RADV_PERFTEST_GE_WAVE_32)
          device->ge_wave_size = 32;
+
+      if (!(device->instance->perftest_flags & RADV_PERFTEST_RT_WAVE_64))
+         device->rt_wave_size = 32;
    }
 
    radv_physical_device_init_mem_types(device);
@@ -879,6 +883,7 @@ static const struct debug_control radv_perftest_options[] = {{"localbos", RADV_P
                                                              {"nggc", RADV_PERFTEST_NGGC},
                                                              {"force_emulate_rt", RADV_PERFTEST_FORCE_EMULATE_RT},
                                                              {"nv_ms", RADV_PERFTEST_NV_MS},
+                                                             {"rtwave64", RADV_PERFTEST_RT_WAVE_64},
                                                              {NULL, 0}};
 
 const char *
@@ -916,6 +921,7 @@ static const driOptionDescription radv_dri_options[] = {
       DRI_CONF_RADV_REPORT_APU_AS_DGPU(false)
       DRI_CONF_RADV_REQUIRE_ETC2(false)
       DRI_CONF_RADV_DISABLE_HTILE_LAYERS(false)
+      DRI_CONF_RADV_DISABLE_ANISO_SINGLE_LEVEL(false)
    DRI_CONF_SECTION_END
 };
 // clang-format on
@@ -964,6 +970,9 @@ radv_init_dri_options(struct radv_instance *instance)
 
    instance->disable_htile_layers =
       driQueryOptionb(&instance->dri_options, "radv_disable_htile_layers");
+
+   instance->disable_aniso_single_level =
+      driQueryOptionb(&instance->dri_options, "radv_disable_aniso_single_level");
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -3311,6 +3320,8 @@ fail:
          device->ws->ctx_destroy(device->hw_ctx[i]);
    }
 
+   mtx_destroy(&device->overallocation_mutex);
+
    vk_device_finish(&device->vk);
    vk_free(&device->vk.alloc, device);
    return result;
@@ -3346,6 +3357,8 @@ radv_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       if (device->hw_ctx[i])
          device->ws->ctx_destroy(device->hw_ctx[i]);
    }
+
+   mtx_destroy(&device->overallocation_mutex);
 
    radv_device_finish_meta(device);
 
@@ -6096,10 +6109,15 @@ radv_init_sampler(struct radv_device *device, struct radv_sampler *sampler,
    sampler->state[3] = (S_008F3C_BORDER_COLOR_PTR(border_color_ptr) |
                         S_008F3C_BORDER_COLOR_TYPE(radv_tex_bordercolor(border_color)));
 
-   if (device->physical_device->rad_info.chip_class < GFX10) {
+   if (device->physical_device->rad_info.chip_class >= GFX10) {
+      sampler->state[2] |=
+         S_008F38_ANISO_OVERRIDE_GFX10(device->instance->disable_aniso_single_level);
+   } else {
       sampler->state[2] |=
          S_008F38_DISABLE_LSB_CEIL(device->physical_device->rad_info.chip_class <= GFX8) |
-         S_008F38_FILTER_PREC_FIX(1);
+         S_008F38_FILTER_PREC_FIX(1) |
+         S_008F38_ANISO_OVERRIDE_GFX8(device->instance->disable_aniso_single_level &&
+                                      device->physical_device->rad_info.chip_class >= GFX8);
    }
 }
 
@@ -6181,8 +6199,17 @@ vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *pSupportedVersion)
     *        - The ICD must implement vkCreate{PLATFORM}SurfaceKHR(),
     *          vkDestroySurfaceKHR(), and other API which uses VKSurfaceKHR,
     *          because the loader no longer does so.
+    *
+    *    - Loader interface v4 differs from v3 in:
+    *        - The ICD must implement vk_icdGetPhysicalDeviceProcAddr().
+    * 
+    *    - Loader interface v5 differs from v4 in:
+    *        - The ICD must support Vulkan API version 1.1 and must not return 
+    *          VK_ERROR_INCOMPATIBLE_DRIVER from vkCreateInstance() unless a
+    *          Vulkan Loader with interface v4 or smaller is being used and the
+    *          application provides an API version that is greater than 1.0.
     */
-   *pSupportedVersion = MIN2(*pSupportedVersion, 4u);
+   *pSupportedVersion = MIN2(*pSupportedVersion, 5u);
    return VK_SUCCESS;
 }
 

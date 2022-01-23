@@ -1,6 +1,5 @@
 /*
- * Copyright © 2017 Red Hat.
- * Copyright © 2017 Valve Corporation.
+ * Copyright © 2017 Igalia
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -18,41 +17,27 @@
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
  * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ *
+ * Authors:
+ *    Neil Roberts.
+ *
  */
 
-#ifndef ST_CB_MEMORYOBJECTS_H
-#define ST_CB_MEMORYOBJECTS_H
+#ifndef NIR_GL_TYPES_H
+#define NIR_GL_TYPES_H
 
-#include "main/mtypes.h"
+#include "GL/gl.h"
 
-struct pipe_screen;
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-struct st_memory_object
-{
-   struct gl_memory_object Base;
-   struct pipe_memory_object *memory;
+GLenum glsl_get_gl_type(const struct glsl_type *type);
 
-   /* TEXTURE_TILING_EXT param from gl_texture_object */
-   GLuint TextureTiling;
-};
-
-static inline struct st_memory_object *
-st_memory_object(struct gl_memory_object *obj)
-{
-   return (struct st_memory_object *)obj;
+#ifdef __cplusplus
 }
+#endif
 
-struct gl_memory_object *
-st_memoryobj_alloc(struct gl_context *ctx, GLuint name);
-
-void
-st_memoryobj_free(struct gl_context *ctx,
-                  struct gl_memory_object *obj);
-void
-st_import_memoryobj_fd(struct gl_context *ctx,
-                       struct gl_memory_object *obj,
-                       GLuint64 size,
-                       int fd);
 #endif

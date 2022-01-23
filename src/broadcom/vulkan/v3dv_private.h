@@ -174,6 +174,10 @@ struct v3dv_physical_device {
    struct {
       bool merge_jobs;
    } options;
+
+   struct {
+      bool multisync;
+   } caps;
 };
 
 VkResult v3dv_physical_device_acquire_display(struct v3dv_instance *instance,
@@ -430,6 +434,32 @@ struct v3dv_pipeline_cache {
    bool externally_synchronized;
 };
 
+/* FIXME: In addition to tracking the last job submitted by GPU queue (cl, csd,
+ * tfu), we still need a syncobj to track the last overall job submitted
+ * (V3DV_QUEUE_ANY) for the case we don't support multisync. Someday we can
+ * start expecting multisync to be present and drop the legacy implementation
+ * together with this V3DV_QUEUE_ANY tracker.
+ */
+enum v3dv_queue_type {
+   V3DV_QUEUE_CL = 0,
+   V3DV_QUEUE_CSD,
+   V3DV_QUEUE_TFU,
+   V3DV_QUEUE_ANY,
+   V3DV_QUEUE_COUNT,
+};
+
+/* For each GPU queue, we use a syncobj to track the last job submitted. We
+ * set the flag `first` to determine when we are starting a new cmd buffer
+ * batch and therefore a job submitted to a given queue will be the first in a
+ * cmd buf batch.
+ */
+struct v3dv_last_job_sync {
+   /* If the job is the first submitted to a GPU queue in a cmd buffer batch */
+   bool first[V3DV_QUEUE_COUNT];
+   /* Array of syncobj to track the last job submitted to a GPU queue */
+   uint32_t syncs[V3DV_QUEUE_COUNT];
+};
+
 struct v3dv_device {
    struct vk_device vk;
 
@@ -439,8 +469,8 @@ struct v3dv_device {
    struct v3d_device_info devinfo;
    struct v3dv_queue queue;
 
-   /* A sync object to track the last job submitted to the GPU. */
-   uint32_t last_job_sync;
+   /* Syncobjs to track the last job submitted to any GPU queue */
+   struct v3dv_last_job_sync last_job_syncs;
 
    /* A mutex to prevent concurrent access to last_job_sync from the queue */
    mtx_t mutex;
@@ -554,6 +584,9 @@ struct v3d_resource_slice {
    uint32_t padded_height_of_output_image_in_uif_blocks;
 };
 
+bool v3dv_format_swizzle_needs_rb_swap(const uint8_t *swizzle);
+bool v3dv_format_swizzle_needs_reverse(const uint8_t *swizzle);
+
 struct v3dv_image {
    struct vk_image vk;
 
@@ -595,6 +628,7 @@ struct v3dv_image_view {
 
    const struct v3dv_format *format;
    bool swap_rb;
+   bool channel_reverse;
    uint32_t internal_bpp;
    uint32_t internal_type;
    uint32_t offset;
@@ -741,6 +775,7 @@ struct v3dv_frame_tiling {
    uint32_t render_target_count;
    uint32_t internal_bpp;
    bool     msaa;
+   bool     double_buffer;
    uint32_t tile_width;
    uint32_t tile_height;
    uint32_t draw_tiles_x;
@@ -760,6 +795,21 @@ bool v3dv_subpass_area_is_tile_aligned(struct v3dv_device *device,
                                        struct v3dv_framebuffer *fb,
                                        struct v3dv_render_pass *pass,
                                        uint32_t subpass_idx);
+
+/* Checks if we need to emit 2 initial tile clears for double buffer mode.
+ * This happens when we render at least 2 tiles, because in this mode each
+ * tile uses a different half of the tile buffer memory so we can have 2 tiles
+ * in flight (one being stored to memory and the next being rendered). In this
+ * scenario, if we emit a single initial tile clear we would only clear the
+ * first half of the tile buffer.
+ */
+static inline bool
+v3dv_do_double_initial_tile_clear(const struct v3dv_frame_tiling *tiling)
+{
+   return tiling->double_buffer &&
+          (tiling->draw_tiles_x > 1 || tiling->draw_tiles_y > 1 ||
+           tiling->layers > 1);
+}
 
 struct v3dv_cmd_pool {
    struct vk_object_base base;
@@ -931,6 +981,19 @@ struct v3dv_copy_query_results_cpu_job_info {
    VkQueryResultFlags flags;
 };
 
+struct v3dv_submit_info_semaphores {
+   /* List of semaphores to wait before running a job */
+   uint32_t wait_sem_count;
+   VkSemaphore *wait_sems;
+
+   /* List of semaphores to signal when all jobs complete */
+   uint32_t signal_sem_count;
+   VkSemaphore *signal_sems;
+
+   /* A fence to signal when all jobs complete */
+   VkFence fence;
+};
+
 struct v3dv_event_set_cpu_job_info {
    struct v3dv_event *event;
    int state;
@@ -942,7 +1005,7 @@ struct v3dv_event_wait_cpu_job_info {
    struct v3dv_event **events;
 
    /* Whether any postponed jobs after the wait should wait on semaphores */
-   bool sem_wait;
+   struct v3dv_submit_info_semaphores *sems_info;
 };
 
 struct v3dv_copy_buffer_to_image_cpu_job_info {
@@ -1042,6 +1105,9 @@ struct v3dv_job {
    /* Whether we need to serialize this job in our command stream */
    bool serialize;
 
+   /* Whether this job is in charge of signalling semaphores */
+   bool do_sem_signal;
+
    /* If this is a CL job, whether we should sync before binning */
    bool needs_bcl_sync;
 
@@ -1087,6 +1153,8 @@ void v3dv_job_start_frame(struct v3dv_job *job,
                           uint32_t render_target_count,
                           uint8_t max_internal_bpp,
                           bool msaa);
+
+bool v3dv_job_type_is_gpu(struct v3dv_job *job);
 
 struct v3dv_job *
 v3dv_job_clone_in_cmd_buffer(struct v3dv_job *job,
@@ -1919,12 +1987,8 @@ const nir_shader_compiler_options *v3dv_pipeline_get_nir_options(void);
 uint32_t v3dv_physical_device_vendor_id(struct v3dv_physical_device *dev);
 uint32_t v3dv_physical_device_device_id(struct v3dv_physical_device *dev);
 
-#ifdef DEBUG
 #define v3dv_debug_ignored_stype(sType) \
-   fprintf(stderr, "%s: ignored VkStructureType %u:%s\n\n", __func__, (sType), vk_StructureType_to_str(sType))
-#else
-#define v3dv_debug_ignored_stype(sType)
-#endif
+   mesa_logd("%s: ignored VkStructureType %u:%s\n\n", __func__, (sType), vk_StructureType_to_str(sType))
 
 const uint8_t *v3dv_get_format_swizzle(struct v3dv_device *device, VkFormat f);
 uint8_t v3dv_get_tex_return_size(const struct v3dv_format *vf, bool compare_enable);
@@ -2012,13 +2076,6 @@ v3dv_descriptor_map_get_texture_shader_state(struct v3dv_device *device,
                                              struct v3dv_descriptor_map *map,
                                              struct v3dv_pipeline_layout *pipeline_layout,
                                              uint32_t index);
-
-const struct v3dv_format*
-v3dv_descriptor_map_get_texture_format(struct v3dv_descriptor_state *descriptor_state,
-                                       struct v3dv_descriptor_map *map,
-                                       struct v3dv_pipeline_layout *pipeline_layout,
-                                       uint32_t index,
-                                       VkFormat *out_vk_format);
 
 struct v3dv_bo*
 v3dv_descriptor_map_get_texture_bo(struct v3dv_descriptor_state *descriptor_state,

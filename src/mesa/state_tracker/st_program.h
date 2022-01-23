@@ -34,7 +34,6 @@
 #ifndef ST_PROGRAM_H
 #define ST_PROGRAM_H
 
-#include "main/mtypes.h"
 #include "main/atifragshader.h"
 #include "program/program.h"
 #include "pipe/p_state.h"
@@ -70,7 +69,7 @@ st_get_external_sampler_key(struct st_context *st, struct gl_program *prog)
 
    while (unlikely(mask)) {
       unsigned unit = u_bit_scan(&mask);
-      struct st_texture_object *stObj =
+      struct gl_texture_object *stObj =
             st_get_texture_object(st->ctx, prog, unit);
       enum pipe_format format = st_get_view_format(stObj);
 

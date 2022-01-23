@@ -183,9 +183,11 @@ d3d12_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 1;
 
    case PIPE_CAP_GLSL_FEATURE_LEVEL:
-      return 330;
+      return 400;
    case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
-      return 330;
+      return 400;
+   case PIPE_CAP_ESSL_FEATURE_LEVEL:
+      return 310;
 
    case PIPE_CAP_COMPUTE:
       return 1;
@@ -271,9 +273,11 @@ d3d12_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_PSIZ_CLAMPED:
    case PIPE_CAP_BLEND_EQUATION_SEPARATE:
    case PIPE_CAP_CONDITIONAL_RENDER:
+   case PIPE_CAP_CONDITIONAL_RENDER_INVERTED:
    case PIPE_CAP_QUERY_TIMESTAMP:
    case PIPE_CAP_VERTEX_ELEMENT_INSTANCE_DIVISOR:
    case PIPE_CAP_VERTEX_ELEMENT_SRC_OFFSET_4BYTE_ALIGNED_ONLY:
+   case PIPE_CAP_IMAGE_STORE_FORMATTED:
       return 1;
 
    case PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS:
@@ -301,6 +305,18 @@ d3d12_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       if (screen->opts.ResourceBindingTier <= D3D12_RESOURCE_BINDING_TIER_2)
          return D3D12_UAV_SLOT_COUNT;
       return 0;
+
+   case PIPE_CAP_START_INSTANCE:
+   case PIPE_CAP_DRAW_PARAMETERS:
+   case PIPE_CAP_DRAW_INDIRECT:
+   case PIPE_CAP_MULTI_DRAW_INDIRECT:
+   case PIPE_CAP_MULTI_DRAW_INDIRECT_PARAMS:
+   case PIPE_CAP_FRAMEBUFFER_NO_ATTACHMENT:
+   case PIPE_CAP_SAMPLE_SHADING:
+      return 1;
+
+   case PIPE_CAP_MAX_VERTEX_STREAMS:
+      return D3D12_SO_BUFFER_SLOT_COUNT;
 
    default:
       return u_pipe_screen_get_param_defaults(pscreen, param);
@@ -530,6 +546,20 @@ d3d12_is_format_supported(struct pipe_screen *pscreen,
         util_format_is_luminance_alpha(format) ||
         util_format_is_yuv(format)))
       return false;
+
+   if (format == PIPE_FORMAT_NONE) {
+      /* For UAV-only rendering, aka ARB_framebuffer_no_attachments */
+      switch (sample_count) {
+      case 0:
+      case 1:
+      case 4:
+      case 8:
+      case 16:
+         return true;
+      default:
+         return false;
+      }
+   }
 
    DXGI_FORMAT dxgi_format = d3d12_get_format(format);
    if (dxgi_format == DXGI_FORMAT_UNKNOWN)

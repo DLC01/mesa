@@ -22,8 +22,10 @@
  */
 
 #include "d3d12_blit.h"
+#include "d3d12_cmd_signature.h"
 #include "d3d12_context.h"
 #include "d3d12_compiler.h"
+#include "d3d12_compute_transforms.h"
 #include "d3d12_debug.h"
 #include "d3d12_fence.h"
 #include "d3d12_format.h"
@@ -79,6 +81,8 @@ d3d12_context_destroy(struct pipe_context *pctx)
    d3d12_gfx_pipeline_state_cache_destroy(ctx);
    d3d12_compute_pipeline_state_cache_destroy(ctx);
    d3d12_root_signature_cache_destroy(ctx);
+   d3d12_cmd_signature_cache_destroy(ctx);
+   d3d12_compute_transform_cache_destroy(ctx);
 
    u_suballocator_destroy(&ctx->query_allocator);
 
@@ -1352,7 +1356,9 @@ d3d12_set_framebuffer_state(struct pipe_context *pctx,
    struct d3d12_context *ctx = d3d12_context(pctx);
    int samples = -1;
 
+   bool prev_cbufs_or_zsbuf = ctx->fb.nr_cbufs || ctx->fb.zsbuf;
    util_copy_framebuffer_state(&d3d12_context(pctx)->fb, state);
+   bool new_cbufs_or_zsbuf = ctx->fb.nr_cbufs || ctx->fb.zsbuf;
 
    ctx->gfx_pipeline_state.num_cbufs = state->nr_cbufs;
    ctx->gfx_pipeline_state.has_float_rtv = false;
@@ -1379,6 +1385,8 @@ d3d12_set_framebuffer_state(struct pipe_context *pctx,
    ctx->gfx_pipeline_state.samples = MAX2(samples, 1);
 
    ctx->state_dirty |= D3D12_DIRTY_FRAMEBUFFER;
+   if (!prev_cbufs_or_zsbuf || !new_cbufs_or_zsbuf)
+      ctx->state_dirty |= D3D12_DIRTY_VIEWPORT;
 }
 
 static void
@@ -1908,9 +1916,7 @@ d3d12_clear_render_target(struct pipe_context *pctx,
    d3d12_batch_reference_surface_texture(d3d12_current_batch(ctx), surf);
 
    if (!render_condition_enabled && ctx->current_predication) {
-      ctx->cmdlist->SetPredication(
-         d3d12_resource_resource(ctx->current_predication), 0,
-         D3D12_PREDICATION_OP_EQUAL_ZERO);
+      d3d12_enable_predication(ctx);
    }
 }
 
@@ -1951,9 +1957,7 @@ d3d12_clear_depth_stencil(struct pipe_context *pctx,
    d3d12_batch_reference_surface_texture(d3d12_current_batch(ctx), surf);
 
    if (!render_condition_enabled && ctx->current_predication) {
-      ctx->cmdlist->SetPredication(
-         d3d12_resource_resource(ctx->current_predication), 0,
-         D3D12_PREDICATION_OP_EQUAL_ZERO);
+      d3d12_enable_predication(ctx);
    }
 }
 
@@ -2147,6 +2151,77 @@ d3d12_memory_barrier(struct pipe_context *pctx, unsigned flags)
    }
 }
 
+static void
+d3d12_get_sample_position(struct pipe_context *pctx, unsigned sample_count, unsigned sample_index,
+                          float *positions)
+{
+   /* Sample patterns transcribed from
+    * https://docs.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_standard_multisample_quality_levels
+    */
+   static const int sample_pattern_1sample[2] = { 0, 0 };
+   static const int sample_pattern_2samples[2][2] = {
+      {  4,  4 },
+      { -4, -4 },
+   };
+   static const int sample_pattern_4samples[4][2] = {
+      { -2, -6 },
+      {  6, -2 },
+      { -6,  2 },
+      {  2,  6 },
+   };
+   static const int sample_pattern_8samples[8][2] = {
+      {  1, -3 },
+      { -1,  3 },
+      {  5,  1 },
+      { -3, -5 },
+      { -5,  5 },
+      { -7, -1 },
+      {  3,  7 },
+      {  7, -7 },
+   };
+   static const int sample_pattern_16samples[16][2] = {
+      {  1,  1 },
+      { -1, -3 },
+      { -3,  2 },
+      {  4, -1 },
+      { -5, -2 },
+      {  2,  5 },
+      {  5,  3 },
+      {  3, -5 },
+      { -2,  6 },
+      {  0, -7 },
+      { -4, -6 },
+      { -6,  4 },
+      { -8,  0 },
+      {  7, -4 },
+      {  6,  7 },
+      { -7, -8 },
+   };
+   const int *samples;
+   switch (sample_count) {
+   case 1:
+   default:
+      samples = sample_pattern_1sample;
+      break;
+   case 2:
+      samples = sample_pattern_2samples[sample_index];
+      break;
+   case 4:
+      samples = sample_pattern_4samples[sample_index];
+      break;
+   case 8:
+      samples = sample_pattern_8samples[sample_index];
+      break;
+   case 16:
+      samples = sample_pattern_16samples[sample_index];
+      break;
+   }
+
+   /* GL coords go from 0 -> 1, D3D from -0.5 -> 0.5 */
+   for (unsigned i = 0; i < 2; ++i)
+      positions[i] = (float)(samples[i] + 8) / 16.0f;
+}
+
 struct pipe_context *
 d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 {
@@ -2231,6 +2306,8 @@ d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 
    ctx->base.memory_barrier = d3d12_memory_barrier;
 
+   ctx->base.get_sample_position = d3d12_get_sample_position;
+
    ctx->gfx_pipeline_state.sample_mask = ~0;
 
    d3d12_context_surface_init(&ctx->base);
@@ -2265,7 +2342,9 @@ d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    d3d12_gfx_pipeline_state_cache_init(ctx);
    d3d12_compute_pipeline_state_cache_init(ctx);
    d3d12_root_signature_cache_init(ctx);
+   d3d12_cmd_signature_cache_init(ctx);
    d3d12_gs_variant_cache_init(ctx);
+   d3d12_compute_transform_cache_init(ctx);
 
    util_dl_library *d3d12_mod = util_dl_open(UTIL_DL_PREFIX "d3d12" UTIL_DL_EXT);
    if (!d3d12_mod) {

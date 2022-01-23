@@ -403,10 +403,28 @@ blorp_measure_start(struct blorp_batch *blorp_batch,
    struct iris_context *ice = blorp_batch->blorp->driver_ctx;
    struct iris_batch *batch = blorp_batch->driver_batch;
 
+   trace_intel_begin_blorp(&batch->trace, batch);
+
    if (batch->measure == NULL)
       return;
 
    iris_measure_snapshot(ice, batch, params->snapshot_type, NULL, NULL, NULL);
+}
+
+
+static void
+blorp_measure_end(struct blorp_batch *blorp_batch,
+                    const struct blorp_params *params)
+{
+   struct iris_batch *batch = blorp_batch->driver_batch;
+
+   trace_intel_end_blorp(&batch->trace, batch,
+                         params->x1 - params->x0,
+                         params->y1 - params->y0,
+                         params->hiz_op,
+                         params->fast_clear_op,
+                         params->shader_type,
+                         params->shader_pipeline);
 }
 
 void

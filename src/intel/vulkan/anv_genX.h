@@ -76,6 +76,22 @@ void genX(cmd_buffer_emit_hashing_mode)(struct anv_cmd_buffer *cmd_buffer,
 void genX(flush_pipeline_select_3d)(struct anv_cmd_buffer *cmd_buffer);
 void genX(flush_pipeline_select_gpgpu)(struct anv_cmd_buffer *cmd_buffer);
 
+enum anv_pipe_bits
+genX(emit_apply_pipe_flushes)(struct anv_batch *batch,
+                              struct anv_device *device,
+                              uint32_t current_pipeline,
+                              enum anv_pipe_bits bits);
+
+void genX(emit_so_memcpy_init)(struct anv_memcpy_state *state,
+                               struct anv_device *device,
+                               struct anv_batch *batch);
+
+void genX(emit_so_memcpy_fini)(struct anv_memcpy_state *state);
+
+void genX(emit_so_memcpy)(struct anv_memcpy_state *state,
+                          struct anv_address dst, struct anv_address src,
+                          uint32_t size);
+
 void genX(emit_l3_config)(struct anv_batch *batch,
                           const struct anv_device *device,
                           const struct intel_l3_config *cfg);
@@ -127,8 +143,9 @@ void genX(blorp_exec)(struct blorp_batch *batch,
                       const struct blorp_params *params);
 
 void genX(cmd_emit_timestamp)(struct anv_batch *batch,
-                              struct anv_bo *bo,
-                              uint32_t offset);
+                              struct anv_device *device,
+                              struct anv_address addr,
+                              bool end_of_pipe);
 
 void
 genX(rasterization_mode)(VkPolygonMode raster_mode,

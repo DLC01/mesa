@@ -30,7 +30,6 @@
 
 #include "util/hash_table.h"
 #include "compiler/glsl/list.h"
-#include "GL/gl.h" /* GLenum */
 #include "util/list.h"
 #include "util/log.h"
 #include "util/ralloc.h"
@@ -3447,6 +3446,9 @@ typedef struct nir_shader_compiler_options {
     */
    bool use_scoped_barrier;
 
+   /** Backend supports fmulz (and ffmaz if lower_ffma32=false) */
+   bool has_fmulz;
+
    /**
     * Is this the Intel vec4 backend?
     *
@@ -5254,7 +5256,21 @@ bool nir_opt_sink(nir_shader *shader, nir_move_options options);
 
 bool nir_opt_move(nir_shader *shader, nir_move_options options);
 
-bool nir_opt_offsets(nir_shader *shader);
+typedef struct {
+   /** nir_load_uniform max base offset */
+   uint32_t uniform_max;
+
+   /** nir_load_ubo_vec4 max base offset */
+   uint32_t ubo_vec4_max;
+
+   /** nir_var_mem_shared max base offset */
+   uint32_t shared_max;
+
+   /** nir_load/store_buffer_amd max base offset */
+   uint32_t buffer_max;
+} nir_opt_offsets_options;
+
+bool nir_opt_offsets(nir_shader *shader, const nir_opt_offsets_options *options);
 
 bool nir_opt_peephole_select(nir_shader *shader, unsigned limit,
                              bool indirect_load_ok, bool expensive_alu_ok);

@@ -57,7 +57,16 @@ is_depth_output(enum dxil_semantic_kind kind)
 static uint8_t
 get_interpolation(nir_variable *var)
 {
-   if (unlikely(var->data.centroid)) {
+   if (var->data.sample) {
+      if (var->data.location == VARYING_SLOT_POS)
+         return DXIL_INTERP_LINEAR_NOPERSPECTIVE_SAMPLE;
+      switch (var->data.interpolation) {
+      case INTERP_MODE_NONE: return DXIL_INTERP_LINEAR_SAMPLE;
+      case INTERP_MODE_FLAT: return DXIL_INTERP_CONSTANT;
+      case INTERP_MODE_NOPERSPECTIVE: return DXIL_INTERP_LINEAR_NOPERSPECTIVE_SAMPLE;
+      case INTERP_MODE_SMOOTH: return DXIL_INTERP_LINEAR_SAMPLE;
+      }
+   } else if (unlikely(var->data.centroid)) {
       if (var->data.location == VARYING_SLOT_POS)
          return DXIL_INTERP_LINEAR_NOPERSPECTIVE_CENTROID;
       switch (var->data.interpolation) {
@@ -65,7 +74,6 @@ get_interpolation(nir_variable *var)
       case INTERP_MODE_FLAT: return DXIL_INTERP_CONSTANT;
       case INTERP_MODE_NOPERSPECTIVE: return DXIL_INTERP_LINEAR_NOPERSPECTIVE_CENTROID;
       case INTERP_MODE_SMOOTH: return DXIL_INTERP_LINEAR_CENTROID;
-
       }
    } else {
       if (var->data.location == VARYING_SLOT_POS)
@@ -496,11 +504,6 @@ get_input_signature_group(struct dxil_module *mod, const struct dxil_mdnode **in
 
       mod->num_psv_inputs = MAX2(mod->num_psv_inputs,
                                  semantic.start_row + semantic.rows);
-
-      mod->info.has_per_sample_input |=
-         semantic.kind == DXIL_SEM_SAMPLE_INDEX ||
-         semantic.interpolation == DXIL_INTERP_LINEAR_SAMPLE ||
-         semantic.interpolation == DXIL_INTERP_LINEAR_NOPERSPECTIVE_SAMPLE;
 
       ++num_inputs;
       assert(num_inputs < VARYING_SLOT_MAX);

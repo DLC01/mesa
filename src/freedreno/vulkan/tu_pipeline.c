@@ -901,13 +901,13 @@ tu6_emit_link_map(struct tu_cs *cs,
 }
 
 static uint16_t
-gl_primitive_to_tess(uint16_t primitive) {
+primitive_to_tess(enum shader_prim primitive) {
    switch (primitive) {
-   case GL_POINTS:
+   case SHADER_PRIM_POINTS:
       return TESS_POINTS;
-   case GL_LINE_STRIP:
+   case SHADER_PRIM_LINE_STRIP:
       return TESS_LINES;
-   case GL_TRIANGLE_STRIP:
+   case SHADER_PRIM_TRIANGLE_STRIP:
       return TESS_CW_TRIS;
    default:
       unreachable("");
@@ -1202,7 +1202,7 @@ tu6_emit_vpc(struct tu_cs *cs,
       uint32_t output;
       if (tess_info->tess.point_mode)
          output = TESS_POINTS;
-      else if (tess_info->tess.primitive_mode == GL_ISOLINES)
+      else if (tess_info->tess._primitive_mode == TESS_PRIMITIVE_ISOLINES)
          output = TESS_LINES;
       else if (tess_info->tess.ccw)
          output = TESS_CCW_TRIS;
@@ -1244,7 +1244,7 @@ tu6_emit_vpc(struct tu_cs *cs,
             tu6_emit_link_map(cs, vs, gs, SB6_GS_SHADER);
          }
          vertices_out = gs->shader->nir->info.gs.vertices_out - 1;
-         output = gl_primitive_to_tess(gs->shader->nir->info.gs.output_primitive);
+         output = primitive_to_tess(gs->shader->nir->info.gs.output_primitive);
          invocations = gs->shader->nir->info.gs.invocations - 1;
          /* Size of per-primitive alloction in ldlw memory in vec4s. */
          vec4_size = gs->shader->nir->info.gs.vertices_in *
@@ -2309,15 +2309,15 @@ tu_pipeline_shader_key_init(struct ir3_shader_key *key,
 static uint32_t
 tu6_get_tessmode(struct tu_shader* shader)
 {
-   uint32_t primitive_mode = shader->ir3_shader->nir->info.tess.primitive_mode;
+   enum tess_primitive_mode primitive_mode = shader->ir3_shader->nir->info.tess._primitive_mode;
    switch (primitive_mode) {
-   case GL_ISOLINES:
+   case TESS_PRIMITIVE_ISOLINES:
       return IR3_TESS_ISOLINES;
-   case GL_TRIANGLES:
+   case TESS_PRIMITIVE_TRIANGLES:
       return IR3_TESS_TRIANGLES;
-   case GL_QUADS:
+   case TESS_PRIMITIVE_QUADS:
       return IR3_TESS_QUADS;
-   case GL_NONE:
+   case TESS_PRIMITIVE_UNSPECIFIED:
       return IR3_TESS_NONE;
    default:
       unreachable("bad tessmode");

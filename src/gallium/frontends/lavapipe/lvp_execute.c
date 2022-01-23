@@ -41,6 +41,7 @@
 #include "util/u_prim.h"
 #include "util/u_prim_restart.h"
 #include "util/format/u_format_zs.h"
+#include "util/ptralloc.h"
 
 #include "vk_util.h"
 
@@ -1853,19 +1854,22 @@ static void handle_begin_rendering(struct vk_cmd_queue_entry *cmd,
       state->cleared_views = realloc(state->cleared_views, sizeof(uint32_t) * attachment_count);
       state->num_pending_aspects = attachment_count;
    }
-
-   /* [lvp_subpass] [attachment_count * lvp_render_pass_attachment] [attachment_count * lvp_render_pass_attachment*] */
-   size_t size = sizeof(struct lvp_subpass) + attachment_count * (sizeof(void*) + sizeof(struct lvp_render_pass_attachment));
-   size_t attachment_offset = sizeof(struct lvp_subpass);
-   size_t attachment_ref_offset = attachment_offset + attachment_count * sizeof(struct lvp_render_pass_attachment);
-   struct lvp_subpass *subpass = calloc(1, size);
-   subpass->color_count = info->colorAttachmentCount;
-   bool has_ds = !!info->pDepthAttachment + !!info->pStencilAttachment;
    state->attachments = realloc(state->attachments, sizeof(*state->attachments) * attachment_count);
-   struct lvp_render_pass_attachment *attachments = (void*)((uint8_t*)subpass + attachment_offset);
+
+   struct lvp_render_pass_attachment *attachments;
+   struct lvp_render_pass_attachment **attachment_refs;
+   /* [lvp_subpass] [attachment_count * lvp_render_pass_attachment] [attachment_count * lvp_render_pass_attachment*] */
+   size_t sizes[] = {attachment_count * sizeof(struct lvp_render_pass_attachment), attachment_count * sizeof(struct lvp_render_pass_attachment*)};
+   void **ptrs[] = {(void**)&attachments, (void**)&attachment_refs};
+   struct lvp_subpass *subpass = ptrzalloc(sizeof(struct lvp_subpass), 2, sizes, ptrs);
+   if (!subpass) {
+      mesa_loge("lavapipe: out of memory!");
+      return;
+   }
+   bool has_ds = !!info->pDepthAttachment + !!info->pStencilAttachment;
    struct lvp_render_pass_attachment *resolve_attachments = num_resolves ? &attachments[subpass->color_count + has_ds] : NULL;
-   struct lvp_render_pass_attachment **attachment_refs = (void*)((uint8_t*)subpass + attachment_ref_offset);
    struct lvp_render_pass_attachment **resolve_attachment_refs = num_resolves ? &attachment_refs[subpass->color_count + has_ds] : NULL;
+   subpass->color_count = info->colorAttachmentCount;
 
    subpass->view_mask = info->viewMask;
    subpass->has_color_resolve = color_resolves > 0;
@@ -3308,16 +3312,19 @@ static struct lvp_cmd_push_descriptor_set *create_push_descriptor_set(struct vk_
    LVP_FROM_HANDLE(lvp_pipeline_layout, layout, in_cmd->layout);
    struct lvp_cmd_push_descriptor_set *out_cmd;
    int count_descriptors = 0;
-   int cmd_size = sizeof(*out_cmd);
 
    for (unsigned i = 0; i < in_cmd->descriptor_write_count; i++) {
       count_descriptors += in_cmd->descriptor_writes[i].descriptorCount;
    }
-   cmd_size += count_descriptors * sizeof(union lvp_descriptor_info);
 
-   cmd_size += in_cmd->descriptor_write_count * sizeof(struct lvp_write_descriptor);
-
-   out_cmd = calloc(1, cmd_size);
+   void *descriptors;
+   void *infos;
+   void **ptrs[] = {&descriptors, &infos};
+   size_t sizes[] = {
+      in_cmd->descriptor_write_count * sizeof(struct lvp_write_descriptor),
+      count_descriptors * sizeof(union lvp_descriptor_info),
+   };
+   out_cmd = ptrzalloc(sizeof(struct lvp_cmd_push_descriptor_set), 2, sizes, ptrs);
    if (!out_cmd)
       return NULL;
 
@@ -3325,8 +3332,8 @@ static struct lvp_cmd_push_descriptor_set *create_push_descriptor_set(struct vk_
    out_cmd->layout = layout;
    out_cmd->set = in_cmd->set;
    out_cmd->descriptor_write_count = in_cmd->descriptor_write_count;
-   out_cmd->descriptors = (struct lvp_write_descriptor *)(out_cmd + 1);
-   out_cmd->infos = (union lvp_descriptor_info *)(out_cmd->descriptors + in_cmd->descriptor_write_count);
+   out_cmd->descriptors = descriptors;
+   out_cmd->infos = infos;
 
    unsigned descriptor_index = 0;
 

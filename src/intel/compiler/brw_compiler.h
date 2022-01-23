@@ -26,7 +26,6 @@
 
 #include <stdio.h>
 #include "dev/intel_device_info.h"
-#include "main/glheader.h"
 #include "main/config.h"
 #include "util/ralloc.h"
 #include "util/u_math.h"
@@ -328,6 +327,7 @@ struct brw_vs_prog_key {
     * the VUE, even if they aren't written by the vertex shader.
     */
    uint8_t point_coord_replace;
+   unsigned clamp_pointsize:1;
 };
 
 /** The program key for Tessellation Control Shaders. */
@@ -335,7 +335,7 @@ struct brw_tcs_prog_key
 {
    struct brw_base_prog_key base;
 
-   GLenum tes_primitive_mode;
+   enum tess_primitive_mode _tes_primitive_mode;
 
    unsigned input_vertices;
 
@@ -367,6 +367,7 @@ struct brw_tes_prog_key
     * clip distances.
     */
    unsigned nr_userclip_plane_consts:4;
+   unsigned clamp_pointsize:1;
 };
 
 /** The program key for Geometry Shaders. */
@@ -382,6 +383,7 @@ struct brw_gs_prog_key
     * clip distances.
     */
    unsigned nr_userclip_plane_consts:4;
+   unsigned clamp_pointsize:1;
 };
 
 struct brw_task_prog_key
@@ -486,6 +488,8 @@ struct brw_wm_prog_key {
    bool stats_wm:1;
    bool flat_shade:1;
    unsigned nr_color_regions:5;
+   bool emit_alpha_test:1;
+   enum compare_func alpha_test_func:3; /* < For Gfx4/5 MRT alpha test */
    bool alpha_test_replicate_alpha:1;
    bool alpha_to_coverage:1;
    bool clamp_fragment_color:1;
@@ -499,7 +503,6 @@ struct brw_wm_prog_key {
 
    uint8_t color_outputs_valid;
    uint64_t input_slots_valid;
-   GLenum alpha_test_func;          /* < For Gfx4/5 MRT alpha test */
    float alpha_test_ref;
 };
 
@@ -734,7 +737,7 @@ struct brw_shader_reloc_value {
 struct brw_stage_prog_data {
    struct brw_ubo_range ubo_ranges[4];
 
-   GLuint nr_params;       /**< number of float params/constants */
+   unsigned nr_params;       /**< number of float params/constants */
 
    gl_shader_stage stage;
 
@@ -827,8 +830,8 @@ enum brw_pixel_shader_computed_depth_mode {
 struct brw_wm_prog_data {
    struct brw_stage_prog_data base;
 
-   GLuint num_per_primitive_inputs;
-   GLuint num_varying_inputs;
+   unsigned num_per_primitive_inputs;
+   unsigned num_varying_inputs;
 
    uint8_t reg_blocks_8;
    uint8_t reg_blocks_16;
@@ -1184,7 +1187,7 @@ void brw_print_vue_map(FILE *fp, const struct brw_vue_map *vue_map,
 /**
  * Convert a VUE slot number into a byte offset within the VUE.
  */
-static inline GLuint brw_vue_slot_to_offset(GLuint slot)
+static inline unsigned brw_vue_slot_to_offset(unsigned slot)
 {
    return 16*slot;
 }
@@ -1193,8 +1196,8 @@ static inline GLuint brw_vue_slot_to_offset(GLuint slot)
  * Convert a vertex output (brw_varying_slot) into a byte offset within the
  * VUE.
  */
-static inline
-GLuint brw_varying_to_offset(const struct brw_vue_map *vue_map, GLuint varying)
+static inline unsigned
+brw_varying_to_offset(const struct brw_vue_map *vue_map, unsigned varying)
 {
    return brw_vue_slot_to_offset(vue_map->varying_to_slot[varying]);
 }
@@ -1259,8 +1262,8 @@ struct brw_vue_prog_data {
    /** Should the hardware deliver input VUE handles for URB pull loads? */
    bool include_vue_handles;
 
-   GLuint urb_read_length;
-   GLuint total_grf;
+   unsigned urb_read_length;
+   unsigned total_grf;
 
    uint32_t clip_distance_mask;
    uint32_t cull_distance_mask;
@@ -1269,7 +1272,7 @@ struct brw_vue_prog_data {
     * URB entry used for both input and output to the thread.  In the GS, this
     * is the size of the URB entry used for output.
     */
-   GLuint urb_entry_size;
+   unsigned urb_entry_size;
 
    enum shader_dispatch_mode dispatch_mode;
 };
@@ -1277,8 +1280,8 @@ struct brw_vue_prog_data {
 struct brw_vs_prog_data {
    struct brw_vue_prog_data base;
 
-   GLbitfield64 inputs_read;
-   GLbitfield64 double_inputs_read;
+   uint64_t inputs_read;
+   uint64_t double_inputs_read;
 
    unsigned nr_attribute_slots;
 
@@ -1355,12 +1358,12 @@ struct brw_gs_prog_data
     * Gfx6: Provoking vertex convention for odd-numbered triangles
     * in tristrips.
     */
-   GLuint pv_first:1;
+   unsigned pv_first:1;
 
    /**
     * Gfx6: Number of varyings that are output to transform feedback.
     */
-   GLuint num_transform_feedback_bindings:7; /* 0-BRW_MAX_SOL_BINDINGS */
+   unsigned num_transform_feedback_bindings:7; /* 0-BRW_MAX_SOL_BINDINGS */
 
    /**
     * Gfx6: Map from the index of a transform feedback binding table entry to the

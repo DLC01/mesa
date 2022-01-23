@@ -999,14 +999,8 @@ test_attachment_completeness(const struct gl_context *ctx, GLenum format,
          }
       }
       else if (format == GL_DEPTH) {
-         if (baseFormat == GL_DEPTH_COMPONENT) {
-            /* OK */
-         }
-         else if (ctx->Extensions.ARB_depth_texture &&
-                  baseFormat == GL_DEPTH_STENCIL) {
-            /* OK */
-         }
-         else {
+         if (baseFormat != GL_DEPTH_COMPONENT &&
+             baseFormat != GL_DEPTH_STENCIL) {
             att->Complete = GL_FALSE;
             att_incomplete("bad depth format");
             return;
@@ -1014,8 +1008,7 @@ test_attachment_completeness(const struct gl_context *ctx, GLenum format,
       }
       else {
          assert(format == GL_STENCIL);
-         if (ctx->Extensions.ARB_depth_texture &&
-             baseFormat == GL_DEPTH_STENCIL) {
+         if (baseFormat == GL_DEPTH_STENCIL) {
             /* OK */
          } else if (ctx->Extensions.ARB_texture_stencil8 &&
                     baseFormat == GL_STENCIL_INDEX) {
@@ -5530,5 +5523,7 @@ _mesa_EvaluateDepthValuesARB(void)
       return;
    }
 
-   st_EvaluateDepthValues(ctx);
+   st_validate_state(st_context(ctx), ST_PIPELINE_UPDATE_FRAMEBUFFER);
+
+   ctx->pipe->evaluate_depth_buffer(ctx->pipe);
 }

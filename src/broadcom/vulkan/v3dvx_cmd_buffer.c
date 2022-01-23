@@ -53,11 +53,13 @@ v3dX(job_emit_binning_prolog)(struct v3dv_job *job,
       config.number_of_layers = layers;
    }
 
+   assert(!tiling->double_buffer || !tiling->msaa);
    cl_emit(&job->bcl, TILE_BINNING_MODE_CFG, config) {
       config.width_in_pixels = tiling->width;
       config.height_in_pixels = tiling->height;
       config.number_of_render_targets = MAX2(tiling->render_target_count, 1);
       config.multisample_mode_4x = tiling->msaa;
+      config.double_buffer_in_non_ms_mode = tiling->double_buffer;
       config.maximum_bpp_of_all_render_targets = tiling->internal_bpp;
    }
 
@@ -115,7 +117,22 @@ cmd_buffer_render_pass_emit_load(struct v3dv_cmd_buffer *cmd_buffer,
       load.address = v3dv_cl_address(image->mem->bo, layer_offset);
 
       load.input_image_format = iview->format->rt_type;
+
+      /* If we create an image view with only the stencil format, we
+       * re-interpret the format as RGBA8_UINT, as it is want we want in
+       * general (see CreateImageView).
+       *
+       * However, when we are loading/storing tiles from the ZSTENCIL tile
+       * buffer, we need to use the underlying DS format.
+       */
+      if (buffer == ZSTENCIL &&
+          iview->format->rt_type == V3D_OUTPUT_IMAGE_FORMAT_RGBA8UI) {
+         assert(image->format->rt_type == V3D_OUTPUT_IMAGE_FORMAT_D24S8);
+         load.input_image_format = image->format->rt_type;
+      }
+
       load.r_b_swap = iview->swap_rb;
+      load.channel_reverse = iview->channel_reverse;
       load.memory_format = slice->tiling;
 
       if (slice->tiling == V3D_TILING_UIF_NO_XOR ||
@@ -302,7 +319,22 @@ cmd_buffer_render_pass_emit_store(struct v3dv_cmd_buffer *cmd_buffer,
       store.clear_buffer_being_stored = clear;
 
       store.output_image_format = iview->format->rt_type;
+
+      /* If we create an image view with only the stencil format, we
+       * re-interpret the format as RGBA8_UINT, as it is want we want in
+       * general (see CreateImageView).
+       *
+       * However, when we are loading/storing tiles from the ZSTENCIL tile
+       * buffer, we need to use the underlying DS format.
+       */
+      if (buffer == ZSTENCIL &&
+          iview->format->rt_type == V3D_OUTPUT_IMAGE_FORMAT_RGBA8UI) {
+         assert(image->format->rt_type == V3D_OUTPUT_IMAGE_FORMAT_D24S8);
+         store.output_image_format = image->format->rt_type;
+      }
+
       store.r_b_swap = iview->swap_rb;
+      store.channel_reverse = iview->channel_reverse;
       store.memory_format = slice->tiling;
 
       if (slice->tiling == V3D_TILING_UIF_NO_XOR ||
@@ -760,11 +792,13 @@ v3dX(cmd_buffer_emit_render_pass_rcl)(struct v3dv_cmd_buffer *cmd_buffer)
     */
    bool do_early_zs_clear = false;
    const uint32_t ds_attachment_idx = subpass->ds_attachment.attachment;
+   assert(!tiling->msaa || !tiling->double_buffer);
    cl_emit(rcl, TILE_RENDERING_MODE_CFG_COMMON, config) {
       config.image_width_pixels = framebuffer->width;
       config.image_height_pixels = framebuffer->height;
       config.number_of_render_targets = MAX2(subpass->color_count, 1);
       config.multisample_mode_4x = tiling->msaa;
+      config.double_buffer_in_non_ms_mode = tiling->double_buffer;
       config.maximum_bpp_of_all_render_targets = tiling->internal_bpp;
 
       if (ds_attachment_idx != VK_ATTACHMENT_UNUSED) {
@@ -942,12 +976,6 @@ v3dX(cmd_buffer_emit_render_pass_rcl)(struct v3dv_cmd_buffer *cmd_buffer)
          tiling->frame_height_in_supertiles;
    }
 
-   /* Start by clearing the tile buffer. */
-   cl_emit(rcl, TILE_COORDINATES, coords) {
-      coords.tile_column_number = 0;
-      coords.tile_row_number = 0;
-   }
-
    /* Emit an initial clear of the tile buffers. This is necessary
     * for any buffers that should be cleared (since clearing
     * normally happens at the *end* of the generic tile list), but
@@ -962,13 +990,13 @@ v3dX(cmd_buffer_emit_render_pass_rcl)(struct v3dv_cmd_buffer *cmd_buffer)
     * changes on V3D 3.x, and 2 dummy stores on 4.x.
     */
    for (int i = 0; i < 2; i++) {
-      if (i > 0)
-         cl_emit(rcl, TILE_COORDINATES, coords);
+      cl_emit(rcl, TILE_COORDINATES, coords);
       cl_emit(rcl, END_OF_LOADS, end);
       cl_emit(rcl, STORE_TILE_BUFFER_GENERAL, store) {
          store.buffer_to_store = NONE;
       }
-      if (i == 0 && cmd_buffer->state.tile_aligned_render_area) {
+      if (cmd_buffer->state.tile_aligned_render_area &&
+          (i == 0 || v3dv_do_double_initial_tile_clear(tiling))) {
          cl_emit(rcl, CLEAR_TILE_BUFFERS, clear) {
             clear.clear_z_stencil_buffer = !job->early_zs_clear;
             clear.clear_all_render_targets = true;
@@ -1714,14 +1742,14 @@ emit_gs_shader_state_record(struct v3dv_job *job,
 }
 
 static uint8_t
-v3d_gs_output_primitive(uint32_t prim_type)
+v3d_gs_output_primitive(enum shader_prim prim_type)
 {
     switch (prim_type) {
-    case GL_POINTS:
+    case SHADER_PRIM_POINTS:
         return GEOMETRY_SHADER_POINTS;
-    case GL_LINE_STRIP:
+    case SHADER_PRIM_LINE_STRIP:
         return GEOMETRY_SHADER_LINE_STRIP;
-    case GL_TRIANGLE_STRIP:
+    case SHADER_PRIM_TRIANGLE_STRIP:
         return GEOMETRY_SHADER_TRI_STRIP;
     default:
         unreachable("Unsupported primitive type");

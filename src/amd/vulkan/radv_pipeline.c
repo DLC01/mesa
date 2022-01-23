@@ -276,6 +276,8 @@ radv_get_hash_flags(const struct radv_device *device, bool stats)
       hash_flags |= RADV_HASH_SHADER_USE_NGG_CULLING;
    if (device->instance->perftest_flags & RADV_PERFTEST_FORCE_EMULATE_RT)
       hash_flags |= RADV_HASH_SHADER_FORCE_EMULATE_RT;
+   if (device->physical_device->rt_wave_size == 64)
+      hash_flags |= RADV_HASH_SHADER_RT_WAVE64;
    if (device->physical_device->cs_wave_size == 32)
       hash_flags |= RADV_HASH_SHADER_CS_WAVE32;
    if (device->physical_device->ps_wave_size == 32)
@@ -870,7 +872,7 @@ radv_pipeline_color_samples(const VkGraphicsPipelineCreateInfo *pCreateInfo)
       vk_find_struct_const(pCreateInfo->pNext, ATTACHMENT_SAMPLE_COUNT_INFO_AMD);
    const VkPipelineRenderingCreateInfoKHR *render_create_info =
       vk_find_struct_const(pCreateInfo->pNext, PIPELINE_RENDERING_CREATE_INFO_KHR);
-   if (sample_info && render_create_info) {
+   if (sample_info && render_create_info && sample_info->colorAttachmentCount > 0) {
       unsigned samples = 1;
       for (uint32_t i = 0; i < sample_info->colorAttachmentCount; ++i) {
          if (render_create_info->pColorAttachmentFormats[i] != VK_FORMAT_UNDEFINED) {
@@ -1284,21 +1286,35 @@ radv_prim_can_use_guardband(enum VkPrimitiveTopology topology)
 }
 
 static uint32_t
+si_conv_tess_prim_to_gs_out(enum tess_primitive_mode prim)
+{
+   switch (prim) {
+   case TESS_PRIMITIVE_TRIANGLES:
+   case TESS_PRIMITIVE_QUADS:
+      return V_028A6C_TRISTRIP;
+   case TESS_PRIMITIVE_ISOLINES:
+      return V_028A6C_LINESTRIP;
+   default:
+      assert(0);
+      return 0;
+   }
+}
+
+static uint32_t
 si_conv_gl_prim_to_gs_out(unsigned gl_prim)
 {
    switch (gl_prim) {
-   case 0: /* GL_POINTS */
+   case SHADER_PRIM_POINTS:
       return V_028A6C_POINTLIST;
-   case 1:      /* GL_LINES */
-   case 3:      /* GL_LINE_STRIP */
-   case 0xA:    /* GL_LINE_STRIP_ADJACENCY_ARB */
-   case 0x8E7A: /* GL_ISOLINES */
+   case SHADER_PRIM_LINES:
+   case SHADER_PRIM_LINE_STRIP:
+   case SHADER_PRIM_LINES_ADJACENCY:
       return V_028A6C_LINESTRIP;
 
-   case 4:   /* GL_TRIANGLES */
-   case 0xc: /* GL_TRIANGLES_ADJACENCY_ARB */
-   case 5:   /* GL_TRIANGLE_STRIP */
-   case 7:   /* GL_QUADS */
+   case SHADER_PRIM_TRIANGLES:
+   case SHADER_PRIM_TRIANGLE_STRIP_ADJACENCY:
+   case SHADER_PRIM_TRIANGLE_STRIP:
+   case SHADER_PRIM_QUADS:
       return V_028A6C_TRISTRIP;
    default:
       assert(0);
@@ -1566,7 +1582,7 @@ radv_pipeline_init_input_assembly_state(struct radv_pipeline *pipeline,
          pipeline->graphics.can_use_guardband = true;
    } else if (radv_pipeline_has_tess(pipeline)) {
       if (!tes->info.tes.point_mode &&
-          si_conv_gl_prim_to_gs_out(tes->info.tes.primitive_mode) == V_028A6C_TRISTRIP)
+          tes->info.tes._primitive_mode != TESS_PRIMITIVE_ISOLINES)
          pipeline->graphics.can_use_guardband = true;
    }
 
@@ -2052,7 +2068,7 @@ radv_get_num_input_vertices(nir_shader **nir)
 
       if (tes->info.tess.point_mode)
          return 1;
-      if (tes->info.tess.primitive_mode == GL_ISOLINES)
+      if (tes->info.tess._primitive_mode == TESS_PRIMITIVE_ISOLINES)
          return 2;
       return 3;
    }
@@ -2588,8 +2604,8 @@ radv_link_shaders(struct radv_pipeline *pipeline,
             info->stage == pipeline->graphics.last_vgt_api_stage &&
             ((info->stage == MESA_SHADER_VERTEX && pipeline_key->vs.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST) ||
              (info->stage == MESA_SHADER_TESS_EVAL && info->tess.point_mode) ||
-             (info->stage == MESA_SHADER_GEOMETRY && info->gs.output_primitive == GL_POINTS) ||
-             (info->stage == MESA_SHADER_MESH && info->mesh.primitive_type == GL_POINTS));
+             (info->stage == MESA_SHADER_GEOMETRY && info->gs.output_primitive == SHADER_PRIM_POINTS) ||
+             (info->stage == MESA_SHADER_MESH && info->mesh.primitive_type == SHADER_PRIM_POINTS));
 
          nir_variable *psiz_var =
                nir_find_variable_with_location(ordered_shaders[i], nir_var_shader_out, VARYING_SLOT_PSIZ);
@@ -2988,7 +3004,7 @@ radv_determine_ngg_settings(struct radv_pipeline *pipeline,
       unsigned num_vertices_per_prim = si_conv_prim_to_gs_out(pipeline_key->vs.topology) + 1;
       if (es_stage == MESA_SHADER_TESS_EVAL)
          num_vertices_per_prim = nir[es_stage]->info.tess.point_mode                      ? 1
-                                 : nir[es_stage]->info.tess.primitive_mode == GL_ISOLINES ? 2
+                                 : nir[es_stage]->info.tess._primitive_mode == TESS_PRIMITIVE_ISOLINES ? 2
                                                                                           : 3;
 
       infos[es_stage].has_ngg_culling = radv_consider_culling(
@@ -3260,16 +3276,17 @@ merge_tess_info(struct shader_info *tes_info, struct shader_info *tcs_info)
           tcs_info->tess.spacing == tes_info->tess.spacing);
    tes_info->tess.spacing |= tcs_info->tess.spacing;
 
-   assert(tcs_info->tess.primitive_mode == 0 || tes_info->tess.primitive_mode == 0 ||
-          tcs_info->tess.primitive_mode == tes_info->tess.primitive_mode);
-   tes_info->tess.primitive_mode |= tcs_info->tess.primitive_mode;
+   assert(tcs_info->tess._primitive_mode == TESS_PRIMITIVE_UNSPECIFIED ||
+          tes_info->tess._primitive_mode == TESS_PRIMITIVE_UNSPECIFIED ||
+          tcs_info->tess._primitive_mode == tes_info->tess._primitive_mode);
+   tes_info->tess._primitive_mode |= tcs_info->tess._primitive_mode;
    tes_info->tess.ccw |= tcs_info->tess.ccw;
    tes_info->tess.point_mode |= tcs_info->tess.point_mode;
 
    /* Copy the merged info back to the TCS */
    tcs_info->tess.tcs_vertices_out = tes_info->tess.tcs_vertices_out;
    tcs_info->tess.spacing = tes_info->tess.spacing;
-   tcs_info->tess.primitive_mode = tes_info->tess.primitive_mode;
+   tcs_info->tess._primitive_mode = tes_info->tess._primitive_mode;
    tcs_info->tess.ccw = tes_info->tess.ccw;
    tcs_info->tess.point_mode = tes_info->tess.point_mode;
 }
@@ -5077,15 +5094,17 @@ radv_pipeline_generate_tess_state(struct radeon_cmdbuf *ctx_cs,
       radeon_set_context_reg(ctx_cs, R_028B58_VGT_LS_HS_CONFIG, ls_hs_config);
    }
 
-   switch (tes->info.tes.primitive_mode) {
-   case GL_TRIANGLES:
+   switch (tes->info.tes._primitive_mode) {
+   case TESS_PRIMITIVE_TRIANGLES:
       type = V_028B6C_TESS_TRIANGLE;
       break;
-   case GL_QUADS:
+   case TESS_PRIMITIVE_QUADS:
       type = V_028B6C_TESS_QUAD;
       break;
-   case GL_ISOLINES:
+   case TESS_PRIMITIVE_ISOLINES:
       type = V_028B6C_TESS_ISOLINE;
+      break;
+   default:
       break;
    }
 
@@ -5114,7 +5133,7 @@ radv_pipeline_generate_tess_state(struct radeon_cmdbuf *ctx_cs,
 
    if (tes->info.tes.point_mode)
       topology = V_028B6C_OUTPUT_POINT;
-   else if (tes->info.tes.primitive_mode == GL_ISOLINES)
+   else if (tes->info.tes._primitive_mode == TESS_PRIMITIVE_ISOLINES)
       topology = V_028B6C_OUTPUT_LINE;
    else if (ccw)
       topology = V_028B6C_OUTPUT_TRIANGLE_CCW;
@@ -5630,8 +5649,8 @@ radv_pipeline_generate_vgt_gs_out(struct radeon_cmdbuf *ctx_cs,
       if (pipeline->shaders[MESA_SHADER_TESS_EVAL]->info.tes.point_mode) {
          gs_out = V_028A6C_POINTLIST;
       } else {
-         gs_out = si_conv_gl_prim_to_gs_out(
-            pipeline->shaders[MESA_SHADER_TESS_EVAL]->info.tes.primitive_mode);
+         gs_out = si_conv_tess_prim_to_gs_out(
+            pipeline->shaders[MESA_SHADER_TESS_EVAL]->info.tes._primitive_mode);
       }
    } else if (radv_pipeline_has_mesh(pipeline)) {
       gs_out =

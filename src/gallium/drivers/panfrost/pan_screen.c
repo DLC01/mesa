@@ -854,8 +854,6 @@ panfrost_create_screen(int fd, struct renderonly *ro)
         if (dev->debug & PAN_DBG_NO_AFBC)
                 dev->has_afbc = false;
 
-        dev->ro = ro;
-
         /* Check if we're loading against a supported GPU model. */
 
         switch (dev->gpu_id) {
@@ -865,6 +863,7 @@ panfrost_create_screen(int fd, struct renderonly *ro)
         case 0x860: /* T860 */
         case 0x6221: /* G72 */
         case 0x7093: /* G31 */
+        case 0x7211: /* G76 */
         case 0x7212: /* G52 */
         case 0x7402: /* G52r1 */
                 break;
@@ -874,6 +873,8 @@ panfrost_create_screen(int fd, struct renderonly *ro)
                 panfrost_destroy_screen(&(screen->base));
                 return NULL;
         }
+
+        dev->ro = ro;
 
         screen->base.destroy = panfrost_destroy_screen;
 

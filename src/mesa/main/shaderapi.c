@@ -69,6 +69,7 @@
 
 #include "state_tracker/st_cb_program.h"
 #include "state_tracker/st_context.h"
+#include "state_tracker/st_program.h"
 
 #ifdef ENABLE_SHADER_CACHE
 #if CUSTOM_SHADER_REPLACEMENT
@@ -705,6 +706,34 @@ check_tes_query(struct gl_context *ctx, const struct gl_shader_program *shProg)
    return false;
 }
 
+static bool
+get_shader_program_completion_status(struct gl_context *ctx,
+                                     struct gl_shader_program *shprog)
+{
+   struct pipe_screen *screen = ctx->screen;
+
+   if (!screen->is_parallel_shader_compilation_finished)
+      return true;
+
+   for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
+      struct gl_linked_shader *linked = shprog->_LinkedShaders[i];
+      void *sh = NULL;
+
+      if (!linked || !linked->Program)
+         continue;
+
+      if (st_program(linked->Program)->variants)
+         sh = st_program(linked->Program)->variants->driver_shader;
+
+      unsigned type = pipe_shader_type_from_mesa(i);
+
+      if (sh &&
+          !screen->is_parallel_shader_compilation_finished(screen, sh, type))
+         return false;
+   }
+   return true;
+}
+
 /**
  * Return the length of a string, or 0 if the pointer passed in is NULL
  */
@@ -755,7 +784,7 @@ get_programiv(struct gl_context *ctx, GLuint program, GLenum pname,
       *params = shProg->DeletePending;
       return;
    case GL_COMPLETION_STATUS_ARB:
-      *params = st_get_shader_program_completion_status(ctx, shProg);
+      *params = get_shader_program_completion_status(ctx, shProg);
       return;
    case GL_LINK_STATUS:
       *params = shProg->data->LinkStatus ? GL_TRUE : GL_FALSE;
@@ -777,13 +806,8 @@ get_programiv(struct gl_context *ctx, GLuint program, GLenum pname,
       *params = _mesa_longest_attribute_name_length(shProg);
       return;
    case GL_ACTIVE_UNIFORMS: {
-      unsigned i;
-      const unsigned num_uniforms =
-         shProg->data->NumUniformStorage - shProg->data->NumHiddenUniforms;
-      for (*params = 0, i = 0; i < num_uniforms; i++) {
-         if (!shProg->data->UniformStorage[i].is_shader_storage)
-            (*params)++;
-      }
+      _mesa_GetProgramInterfaceiv(program, GL_UNIFORM, GL_ACTIVE_RESOURCES,
+                                  params);
       return;
    }
    case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
@@ -1007,8 +1031,22 @@ get_programiv(struct gl_context *ctx, GLuint program, GLenum pname,
       if (!has_tess)
          break;
       if (check_tes_query(ctx, shProg)) {
-         *params = shProg->_LinkedShaders[MESA_SHADER_TESS_EVAL]->
-            Program->info.tess.primitive_mode;
+         const struct gl_linked_shader *tes =
+            shProg->_LinkedShaders[MESA_SHADER_TESS_EVAL];
+         switch (tes->Program->info.tess._primitive_mode) {
+         case TESS_PRIMITIVE_TRIANGLES:
+            *params = GL_TRIANGLES;
+            break;
+         case TESS_PRIMITIVE_QUADS:
+            *params = GL_QUADS;
+            break;
+         case TESS_PRIMITIVE_ISOLINES:
+            *params = GL_ISOLINES;
+            break;
+         case TESS_PRIMITIVE_UNSPECIFIED:
+            *params = 0;
+            break;
+         }
       }
       return;
    case GL_TESS_GEN_SPACING:

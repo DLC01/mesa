@@ -353,7 +353,7 @@ anv_gather_meminfo(struct anv_physical_device *device, int fd, bool update)
 	                sizeof(struct drm_i915_memory_region_info)];
 
    struct drm_i915_query_memory_regions *mem_regions =
-      intel_i915_query_alloc(fd, DRM_I915_QUERY_MEMORY_REGIONS);
+      intel_i915_query_alloc(fd, DRM_I915_QUERY_MEMORY_REGIONS, NULL);
    if (mem_regions == NULL) {
       if (device->info.has_local_mem) {
          return vk_errorf(device, VK_ERROR_INCOMPATIBLE_DRIVER,
@@ -1125,6 +1125,8 @@ VkResult anv_CreateInstance(
    VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
 
    anv_init_dri_options(instance);
+
+   intel_driver_ds_init();
 
    *pInstance = anv_instance_to_handle(instance);
 
@@ -3297,6 +3299,8 @@ VkResult anv_CreateDevice(
 
    anv_device_perf_init(device);
 
+   anv_device_utrace_init(device);
+
    *pDevice = anv_device_to_handle(device);
 
    return VK_SUCCESS;
@@ -3363,6 +3367,8 @@ void anv_DestroyDevice(
 
    if (!device)
       return;
+
+   anv_device_utrace_finish(device);
 
    anv_device_finish_blorp(device);
 
@@ -3648,13 +3654,6 @@ VkResult anv_AllocateMemory(
        (host_ptr_info && host_ptr_info->handleType)) {
       /* Anything imported or exported is EXTERNAL */
       alloc_flags |= ANV_BO_ALLOC_EXTERNAL;
-
-      /* We can't have implicit CCS on external memory with an AUX-table.
-       * Doing so would require us to sync the aux tables across processes
-       * which is impractical.
-       */
-      if (device->info.has_aux_map)
-         alloc_flags &= ~ANV_BO_ALLOC_IMPLICIT_CCS;
    }
 
    /* Check if we need to support Android HW buffer export. If so,
@@ -4647,8 +4646,14 @@ vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion)
     *
     *    - Loader interface v4 differs from v3 in:
     *        - The ICD must implement vk_icdGetPhysicalDeviceProcAddr().
+    * 
+    *    - Loader interface v5 differs from v4 in:
+    *        - The ICD must support Vulkan API version 1.1 and must not return 
+    *          VK_ERROR_INCOMPATIBLE_DRIVER from vkCreateInstance() unless a
+    *          Vulkan Loader with interface v4 or smaller is being used and the
+    *          application provides an API version that is greater than 1.0.
     */
-   *pSupportedVersion = MIN2(*pSupportedVersion, 4u);
+   *pSupportedVersion = MIN2(*pSupportedVersion, 5u);
    return VK_SUCCESS;
 }
 

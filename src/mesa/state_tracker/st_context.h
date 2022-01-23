@@ -51,7 +51,6 @@ struct draw_stage;
 struct gen_mipmap_state;
 struct st_context;
 struct st_program;
-struct st_perf_monitor_group;
 struct u_upload_mgr;
 
 #define ST_L3_PINNING_DISABLED 0xffffffff
@@ -362,8 +361,6 @@ struct st_context
 
    struct st_config_options options;
 
-   struct st_perf_monitor_group *perfmon;
-
    enum pipe_reset_status reset_status;
 
    /* Array of bound texture/image handles which are resident in the context.
@@ -453,12 +450,7 @@ struct st_framebuffer
    struct list_head head;
 };
 
-void st_Enable(struct gl_context *ctx, GLenum cap);
-void st_query_memory_info(struct gl_context *ctx, struct gl_memory_info *out);
-
 void st_invalidate_state(struct gl_context *ctx);
-void st_get_driver_uuid(struct gl_context *ctx, char *uuid);
-void st_get_device_uuid(struct gl_context *ctx, char *uuid);
 void st_set_background_context(struct gl_context *ctx,
                                struct util_queue_monitoring *queue_info);
 #ifdef __cplusplus

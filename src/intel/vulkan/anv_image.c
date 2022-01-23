@@ -536,8 +536,15 @@ add_aux_state_tracking_buffer(struct anv_device *device,
    enum anv_image_memory_binding binding =
       ANV_IMAGE_MEMORY_BINDING_PLANE_0 + plane;
 
-   if (image->vk.drm_format_mod != DRM_FORMAT_MOD_INVALID)
-       binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
+   /* If an auxiliary surface is used for an externally-shareable image,
+    * we have to hide this from the memory of the image since other
+    * processes with access to the memory may not be aware of it or of
+    * its current state. So put that auxiliary data into a separate
+    * buffer (ANV_IMAGE_MEMORY_BINDING_PRIVATE).
+    */
+   if (anv_image_is_externally_shared(image)) {
+      binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
+   }
 
    /* We believe that 256B alignment may be sufficient, but we choose 4K due to
     * lack of testing.  And MI_LOAD/STORE operations require dword-alignment.
@@ -944,9 +951,16 @@ check_memory_bindings(const struct anv_device *device,
       if (anv_surface_is_valid(&plane->aux_surface)) {
          enum anv_image_memory_binding binding = primary_binding;
 
-         if (image->vk.drm_format_mod != DRM_FORMAT_MOD_INVALID &&
-             !isl_drm_modifier_has_aux(image->vk.drm_format_mod))
+         /* If an auxiliary surface is used for an externally-shareable image,
+          * we have to hide this from the memory of the image since other
+          * processes with access to the memory may not be aware of it or of
+          * its current state. So put that auxiliary data into a separate
+          * buffer (ANV_IMAGE_MEMORY_BINDING_PRIVATE).
+          */
+         if (anv_image_is_externally_shared(image) &&
+             !isl_drm_modifier_has_aux(image->vk.drm_format_mod)) {
             binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
+         }
 
          /* Display hardware requires that the aux surface start at
           * a higher address than the primary surface. The 3D hardware
@@ -962,8 +976,15 @@ check_memory_bindings(const struct anv_device *device,
       if (plane->fast_clear_memory_range.size > 0) {
          enum anv_image_memory_binding binding = primary_binding;
 
-         if (image->vk.drm_format_mod != DRM_FORMAT_MOD_INVALID)
+         /* If an auxiliary surface is used for an externally-shareable image,
+          * we have to hide this from the memory of the image since other
+          * processes with access to the memory may not be aware of it or of
+          * its current state. So put that auxiliary data into a separate
+          * buffer (ANV_IMAGE_MEMORY_BINDING_PRIVATE).
+          */
+         if (anv_image_is_externally_shared(image)) {
             binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
+         }
 
          /* We believe that 256B alignment may be sufficient, but we choose 4K
           * due to lack of testing.  And MI_LOAD/STORE operations require
@@ -1421,19 +1442,8 @@ static struct anv_image *
 anv_swapchain_get_image(VkSwapchainKHR swapchain,
                         uint32_t index)
 {
-   uint32_t n_images = index + 1;
-   VkImage *images = malloc(sizeof(*images) * n_images);
-   VkResult result = wsi_common_get_images(swapchain, &n_images, images);
-
-   if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
-      free(images);
-      return NULL;
-   }
-
-   ANV_FROM_HANDLE(anv_image, image, images[index]);
-   free(images);
-
-   return image;
+   VkImage image = wsi_common_get_image(swapchain, index);
+   return anv_image_from_handle(image);
 }
 
 static VkResult
@@ -2682,6 +2692,7 @@ anv_CreateImageView(VkDevice _device,
                                          general_aux_usage, NULL,
                                          ANV_IMAGE_VIEW_STATE_STORAGE_LOWERED,
                                          &iview->planes[vplane].lowered_storage_surface_state,
+                                         device->info.ver >= 9 ? NULL :
                                          &iview->planes[vplane].lowered_storage_image_param);
          } else {
             /* In this case, we support the format but, because there's no

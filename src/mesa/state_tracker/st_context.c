@@ -42,15 +42,11 @@
 #include "st_debug.h"
 #include "st_cb_bitmap.h"
 #include "st_cb_clear.h"
-#include "st_cb_condrender.h"
 #include "st_cb_drawpixels.h"
 #include "st_cb_drawtex.h"
 #include "st_cb_eglimage.h"
 #include "st_cb_feedback.h"
-#include "st_cb_perfmon.h"
-#include "st_cb_perfquery.h"
 #include "st_cb_program.h"
-#include "st_cb_queryobj.h"
 #include "st_cb_flush.h"
 #include "st_atom.h"
 #include "st_draw.h"
@@ -60,7 +56,6 @@
 #include "st_program.h"
 #include "st_sampler_view.h"
 #include "st_shader_cache.h"
-#include "st_vdpau.h"
 #include "st_texture.h"
 #include "st_util.h"
 #include "pipe/p_context.h"
@@ -74,46 +69,6 @@
 #include "nir/nir_to_tgsi.h"
 
 DEBUG_GET_ONCE_BOOL_OPTION(mesa_mvp_dp4, "MESA_MVP_DP4", FALSE)
-
-
-void
-st_Enable(struct gl_context *ctx, GLenum cap)
-{
-   struct st_context *st = st_context(ctx);
-
-   switch (cap) {
-   case GL_DEBUG_OUTPUT:
-   case GL_DEBUG_OUTPUT_SYNCHRONOUS:
-      st_update_debug_callback(st);
-      break;
-   case GL_BLACKHOLE_RENDER_INTEL:
-      st->pipe->set_frontend_noop(st->pipe, ctx->IntelBlackholeRender);
-      break;
-   default:
-      break;
-   }
-}
-
-void
-st_query_memory_info(struct gl_context *ctx, struct gl_memory_info *out)
-{
-   struct pipe_screen *screen = st_context(ctx)->screen;
-   struct pipe_memory_info info;
-
-   assert(screen->query_memory_info);
-   if (!screen->query_memory_info)
-      return;
-
-   screen->query_memory_info(screen, &info);
-
-   out->total_device_memory = info.total_device_memory;
-   out->avail_device_memory = info.avail_device_memory;
-   out->total_staging_memory = info.total_staging_memory;
-   out->avail_staging_memory = info.avail_staging_memory;
-   out->device_memory_evicted = info.device_memory_evicted;
-   out->nr_device_memory_evictions = info.nr_device_memory_evictions;
-}
-
 
 static uint64_t
 st_get_active_states(struct gl_context *ctx)
@@ -424,7 +379,6 @@ st_destroy_context_priv(struct st_context *st, bool destroy_pipe)
    st_destroy_bitmap(st);
    st_destroy_drawpix(st);
    st_destroy_drawtex(st);
-   st_destroy_perfmon(st);
    st_destroy_pbo_helpers(st);
    st_destroy_bound_texture_handles(st);
    st_destroy_bound_image_handles(st);
@@ -438,7 +392,7 @@ st_destroy_context_priv(struct st_context *st, bool destroy_pipe)
    if (st->pipe && destroy_pipe)
       st->pipe->destroy(st->pipe);
 
-   free(st);
+   FREE(st);
 }
 
 
@@ -495,6 +449,29 @@ st_init_driver_flags(struct st_context *st)
                                 ST_NEW_FS_STATE | ST_NEW_CS_STATE;
 }
 
+static bool
+st_have_perfmon(struct st_context *st)
+{
+   struct pipe_screen *screen = st->screen;
+
+   if (!screen->get_driver_query_info || !screen->get_driver_query_group_info)
+      return false;
+
+   return screen->get_driver_query_group_info(screen, 0, NULL) != 0;
+}
+
+static bool
+st_have_perfquery(struct st_context *ctx)
+{
+   struct pipe_context *pipe = ctx->pipe;
+
+   return pipe->init_intel_perf_query_info && pipe->get_intel_perf_query_info &&
+          pipe->get_intel_perf_query_counter_info &&
+          pipe->new_intel_perf_query_obj && pipe->begin_intel_perf_query &&
+          pipe->end_intel_perf_query && pipe->delete_intel_perf_query &&
+          pipe->wait_intel_perf_query && pipe->is_intel_perf_query_ready &&
+          pipe->get_intel_perf_query_data;
+}
 
 static struct st_context *
 st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
@@ -502,7 +479,7 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
 {
    struct pipe_screen *screen = pipe->screen;
    uint i;
-   struct st_context *st = ST_CALLOC_STRUCT( st_context);
+   struct st_context *st = CALLOC_STRUCT( st_context);
 
    util_cpu_detect();
 
@@ -823,15 +800,6 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
    return st;
 }
 
-
-static void
-st_emit_string_marker(struct gl_context *ctx, const GLchar *string, GLsizei len)
-{
-   struct st_context *st = ctx->st;
-   st->pipe->emit_string_marker(st->pipe, string, len);
-}
-
-
 void
 st_set_background_context(struct gl_context *ctx,
                           struct util_queue_monitoring *queue_info)
@@ -843,39 +811,6 @@ st_set_background_context(struct gl_context *ctx,
    assert(smapi->set_background_context);
    smapi->set_background_context(&st->iface, queue_info);
 }
-
-
-void
-st_get_device_uuid(struct gl_context *ctx, char *uuid)
-{
-   struct pipe_screen *screen = st_context(ctx)->screen;
-
-   assert(GL_UUID_SIZE_EXT >= PIPE_UUID_SIZE);
-   memset(uuid, 0, GL_UUID_SIZE_EXT);
-   screen->get_device_uuid(screen, uuid);
-}
-
-
-void
-st_get_driver_uuid(struct gl_context *ctx, char *uuid)
-{
-   struct pipe_screen *screen = st_context(ctx)->screen;
-
-   assert(GL_UUID_SIZE_EXT >= PIPE_UUID_SIZE);
-   memset(uuid, 0, GL_UUID_SIZE_EXT);
-   screen->get_driver_uuid(screen, uuid);
-}
-
-
-static void
-st_pin_driver_to_l3_cache(struct gl_context *ctx, unsigned L3_cache)
-{
-   struct pipe_context *pipe = st_context(ctx)->pipe;
-
-   pipe->set_context_param(pipe, PIPE_CONTEXT_PARAM_PIN_THREADS_TO_L3_CACHE,
-                           L3_cache);
-}
-
 
 static void
 st_init_driver_functions(struct pipe_screen *screen,
@@ -889,14 +824,7 @@ st_init_driver_functions(struct pipe_screen *screen,
    st_init_program_functions(functions);
    st_init_flush_functions(screen, functions);
 
-   st_init_vdpau_functions(functions);
-
-   if (screen->get_param(screen, PIPE_CAP_STRING_MARKER))
-      functions->EmitStringMarker = st_emit_string_marker;
-
    /* GL_ARB_get_program_binary */
-   functions->GetProgramBinaryDriverSHA1 = st_get_program_binary_driver_sha1;
-
    enum pipe_shader_ir preferred_ir = (enum pipe_shader_ir)
       screen->get_shader_param(screen, PIPE_SHADER_VERTEX,
                                PIPE_SHADER_CAP_PREFERRED_IR);
@@ -933,9 +861,6 @@ st_create_context(gl_api api, struct pipe_context *pipe,
    memset(&funcs, 0, sizeof(funcs));
    st_init_driver_functions(pipe->screen, &funcs, has_egl_image_validate);
 
-   if (pipe->set_context_param)
-      funcs.PinDriverToL3Cache = st_pin_driver_to_l3_cache;
-
    /* gl_context must be 16-byte aligned due to the alignment on GLmatrix. */
    ctx = align_malloc(sizeof(struct gl_context), 16);
    if (!ctx)
@@ -943,6 +868,8 @@ st_create_context(gl_api api, struct pipe_context *pipe,
    memset(ctx, 0, sizeof(*ctx));
 
    ctx->pipe = pipe;
+   ctx->screen = pipe->screen;
+
    if (!_mesa_initialize_context(ctx, api, visual, shareCtx, &funcs)) {
       align_free(ctx);
       return NULL;
@@ -985,7 +912,7 @@ destroy_tex_sampler_cb(void *data, void *userData)
    struct gl_texture_object *texObj = (struct gl_texture_object *) data;
    struct st_context *st = (struct st_context *) userData;
 
-   st_texture_release_context_sampler_view(st, st_texture_object(texObj));
+   st_texture_release_context_sampler_view(st, texObj);
 }
 
 static void
@@ -997,7 +924,7 @@ destroy_framebuffer_attachment_sampler_cb(void *data, void *userData)
     for (unsigned i = 0; i < BUFFER_COUNT; i++) {
       struct gl_renderbuffer_attachment *att = &glfb->Attachment[i];
       if (att->Texture) {
-        st_texture_release_context_sampler_view(st, st_texture_object(att->Texture));
+        st_texture_release_context_sampler_view(st, att->Texture);
       }
    }
 }
@@ -1035,8 +962,8 @@ st_destroy_context(struct st_context *st)
     * context.
     */
    for (unsigned i = 0; i < NUM_TEXTURE_TARGETS; i++) {
-      struct st_texture_object *stObj =
-         st_texture_object(ctx->Shared->FallbackTex[i]);
+      struct gl_texture_object *stObj =
+         ctx->Shared->FallbackTex[i];
       if (stObj) {
          st_texture_release_context_sampler_view(st, stObj);
       }

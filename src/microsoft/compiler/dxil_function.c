@@ -41,6 +41,7 @@ static struct  predefined_func_descr predefined_funcs[] = {
 {"dx.op.storeOutput", "v", "iiicO", DXIL_ATTR_KIND_NO_UNWIND},
 {"dx.op.loadInput", "O", "iiici", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.tertiary", "O", "iOOO", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.quaternary", "O", "iOOOO", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.threadId", "i", "ii", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.threadIdInGroup", "i", "ii", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.flattenedThreadIdInGroup", "i", "i", DXIL_ATTR_KIND_READ_NONE},
@@ -60,6 +61,7 @@ static struct  predefined_func_descr predefined_funcs[] = {
 {"dx.op.sampleCmpLevelZero", "R", "i@@ffffiiif", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.textureLoad", "R", "i@iiiiiii", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.textureGather", "R", "i@@ffffiii", DXIL_ATTR_KIND_READ_ONLY},
+{"dx.op.textureGatherCmp", "R", "i@@ffffiiif", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.discard", "v", "ib", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.sampleIndex", "i", "i", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.emitStream", "v", "ic", DXIL_ATTR_KIND_NONE},
@@ -70,10 +72,18 @@ static struct  predefined_func_descr predefined_funcs[] = {
 {"dx.op.atomicCompareExchange", "O", "i@iiiii", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.textureStore", "v", "i@iiiOOOOc", DXIL_ATTR_KIND_NONE},
 {"dx.op.primitiveID", "i", "i", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.outputControlPointID", "i", "i", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.gsInstanceID", "i", "i", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.legacyF16ToF32", "f", "ii", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.legacyF32ToF16", "i", "if", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.makeDouble", "g", "iii", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.splitDouble", "G", "ig", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.texture2DMSGetSamplePosition", "S", "i@i", DXIL_ATTR_KIND_READ_ONLY},
+{"dx.op.renderTargetGetSamplePosition", "S", "ii", DXIL_ATTR_KIND_READ_ONLY},
+{"dx.op.evalSnapped", "O", "iiicii", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.evalCentroid", "O", "iiic", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.evalSampleIndex", "O", "iiici", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.coverage", "i", "i", DXIL_ATTR_KIND_READ_NONE},
 };
 
 struct func_descr {
@@ -175,6 +185,7 @@ get_type_from_string(struct dxil_module *mod, const char *param_descr,
    case DXIL_FUNC_PARAM_FROM_OVERLOAD:  return dxil_get_overload_type(mod, overload);
    case DXIL_FUNC_PARAM_RESRET: return dxil_module_get_resret_type(mod, overload);
    case DXIL_FUNC_PARAM_DIM: return dxil_module_get_dimret_type(mod);
+   case DXIL_FUNC_PARAM_SAMPLE_POS: return dxil_module_get_samplepos_type(mod);
    case DXIL_FUNC_PARAM_CBUF_RET: return dxil_module_get_cbuf_ret_type(mod, overload);
    case DXIL_FUNC_PARAM_SPLIT_DOUBLE: return dxil_module_get_split_double_ret_type(mod);
    case DXIL_FUNC_PARAM_POINTER: {
