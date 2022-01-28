@@ -2758,7 +2758,6 @@ struct anv_attachment_state {
    VkImageLayout                                current_layout;
    VkImageLayout                                current_stencil_layout;
    VkImageAspectFlags                           pending_clear_aspects;
-   VkImageAspectFlags                           pending_load_aspects;
    bool                                         fast_clear;
    VkClearValue                                 clear_value;
 
@@ -2913,6 +2912,103 @@ struct anv_cmd_ray_tracing_state {
    } scratch;
 };
 
+struct anv_framebuffer {
+   struct vk_object_base                        base;
+
+   uint32_t                                     width;
+   uint32_t                                     height;
+   uint32_t                                     layers;
+
+   uint32_t                                     attachment_count;
+   struct anv_image_view *                      attachments[0];
+};
+
+struct anv_subpass_attachment {
+   VkImageUsageFlagBits usage;
+   uint32_t attachment;
+   VkImageLayout layout;
+
+   /* Used only with attachment containing stencil data. */
+   VkImageLayout stencil_layout;
+};
+
+struct anv_subpass {
+   uint32_t                                     attachment_count;
+
+   /**
+    * A pointer to all attachment references used in this subpass.
+    * Only valid if ::attachment_count > 0.
+    */
+   struct anv_subpass_attachment *              attachments;
+   uint32_t                                     input_count;
+   struct anv_subpass_attachment *              input_attachments;
+   uint32_t                                     color_count;
+   struct anv_subpass_attachment *              color_attachments;
+   struct anv_subpass_attachment *              resolve_attachments;
+
+   struct anv_subpass_attachment *              depth_stencil_attachment;
+   struct anv_subpass_attachment *              ds_resolve_attachment;
+   VkResolveModeFlagBitsKHR                     depth_resolve_mode;
+   VkResolveModeFlagBitsKHR                     stencil_resolve_mode;
+
+   uint32_t                                     view_mask;
+
+   /** Subpass has a depth/stencil self-dependency */
+   bool                                         has_ds_self_dep;
+
+   /** Subpass has at least one color resolve attachment */
+   bool                                         has_color_resolve;
+};
+
+struct anv_render_pass_attachment {
+   /* TODO: Consider using VkAttachmentDescription instead of storing each of
+    * its members individually.
+    */
+   VkFormat                                     format;
+   uint32_t                                     samples;
+   VkImageUsageFlags                            usage;
+   VkAttachmentLoadOp                           load_op;
+   VkAttachmentStoreOp                          store_op;
+   VkAttachmentLoadOp                           stencil_load_op;
+   VkImageLayout                                initial_layout;
+   VkImageLayout                                final_layout;
+   VkImageLayout                                first_subpass_layout;
+
+   VkImageLayout                                stencil_initial_layout;
+   VkImageLayout                                stencil_final_layout;
+
+   /* The subpass id in which the attachment will be used last. */
+   uint32_t                                     last_subpass_idx;
+};
+
+struct anv_render_pass {
+   struct vk_object_base                        base;
+
+   uint32_t                                     attachment_count;
+   uint32_t                                     subpass_count;
+   /* An array of subpass_count+1 flushes, one per subpass boundary */
+   enum anv_pipe_bits *                         subpass_flushes;
+   struct anv_render_pass_attachment *          attachments;
+   struct anv_subpass                           subpasses[0];
+};
+
+/* RTs * 2 (for resolve attachments)
+ * depth/sencil * 2
+ */
+#define MAX_DYN_RENDER_ATTACHMENTS (MAX_RTS * 2 + 2 * 2)
+
+/* And this, kids, is what we call a nasty hack. */
+struct anv_dynamic_render_pass {
+   struct anv_render_pass                    pass;
+   struct anv_subpass                        subpass;
+   struct anv_framebuffer                    framebuffer;
+   struct anv_render_pass_attachment         rp_attachments[MAX_DYN_RENDER_ATTACHMENTS];
+   struct anv_subpass_attachment             sp_attachments[MAX_DYN_RENDER_ATTACHMENTS];
+
+   bool suspending;
+   bool resuming;
+};
+
 /** State required while building cmd buffer */
 struct anv_cmd_state {
    /* PIPELINE_SELECT.PipelineSelection */
@@ -2990,6 +3086,8 @@ struct anv_cmd_state {
     * is one of the states in attachment_states.
     */
    struct anv_state                             null_surface_state;
+
+   struct anv_dynamic_render_pass               dynamic_render_pass;
 };
 
 struct anv_cmd_pool {
@@ -3378,6 +3476,7 @@ struct anv_graphics_pipeline {
    uint32_t                                     rasterization_samples;
 
    struct anv_subpass *                         subpass;
+   struct anv_render_pass *                     pass;
 
    struct anv_shader_bin *                      shaders[ANV_GRAPHICS_SHADER_STAGE_COUNT];
 
@@ -3432,6 +3531,8 @@ struct anv_graphics_pipeline {
    struct {
       uint32_t                                  wm_depth_stencil[4];
    } gfx9;
+
+   struct anv_dynamic_render_pass               dynamic_render_pass;
 };
 
 struct anv_compute_pipeline {
@@ -4370,91 +4471,11 @@ struct anv_sampler {
    struct anv_state             custom_border_color;
 };
 
-struct anv_framebuffer {
-   struct vk_object_base                        base;
-
-   uint32_t                                     width;
-   uint32_t                                     height;
-   uint32_t                                     layers;
-
-   uint32_t                                     attachment_count;
-   struct anv_image_view *                      attachments[0];
-};
-
-struct anv_subpass_attachment {
-   VkImageUsageFlagBits usage;
-   uint32_t attachment;
-   VkImageLayout layout;
-
-   /* Used only with attachment containing stencil data. */
-   VkImageLayout stencil_layout;
-};
-
-struct anv_subpass {
-   uint32_t                                     attachment_count;
-
-   /**
-    * A pointer to all attachment references used in this subpass.
-    * Only valid if ::attachment_count > 0.
-    */
-   struct anv_subpass_attachment *              attachments;
-   uint32_t                                     input_count;
-   struct anv_subpass_attachment *              input_attachments;
-   uint32_t                                     color_count;
-   struct anv_subpass_attachment *              color_attachments;
-   struct anv_subpass_attachment *              resolve_attachments;
-
-   struct anv_subpass_attachment *              depth_stencil_attachment;
-   struct anv_subpass_attachment *              ds_resolve_attachment;
-   VkResolveModeFlagBitsKHR                     depth_resolve_mode;
-   VkResolveModeFlagBitsKHR                     stencil_resolve_mode;
-
-   uint32_t                                     view_mask;
-
-   /** Subpass has a depth/stencil self-dependency */
-   bool                                         has_ds_self_dep;
-
-   /** Subpass has at least one color resolve attachment */
-   bool                                         has_color_resolve;
-};
-
 static inline unsigned
 anv_subpass_view_count(const struct anv_subpass *subpass)
 {
    return MAX2(1, util_bitcount(subpass->view_mask));
 }
-
-struct anv_render_pass_attachment {
-   /* TODO: Consider using VkAttachmentDescription instead of storing each of
-    * its members individually.
-    */
-   VkFormat                                     format;
-   uint32_t                                     samples;
-   VkImageUsageFlags                            usage;
-   VkAttachmentLoadOp                           load_op;
-   VkAttachmentStoreOp                          store_op;
-   VkAttachmentLoadOp                           stencil_load_op;
-   VkImageLayout                                initial_layout;
-   VkImageLayout                                final_layout;
-   VkImageLayout                                first_subpass_layout;
-
-   VkImageLayout                                stencil_initial_layout;
-   VkImageLayout                                stencil_final_layout;
-
-   /* The subpass id in which the attachment will be used last. */
-   uint32_t                                     last_subpass_idx;
-};
-
-struct anv_render_pass {
-   struct vk_object_base                        base;
-
-   uint32_t                                     attachment_count;
-   uint32_t                                     subpass_count;
-   /* An array of subpass_count+1 flushes, one per subpass boundary */
-   enum anv_pipe_bits *                         subpass_flushes;
-   struct anv_render_pass_attachment *          attachments;
-   struct anv_subpass                           subpasses[0];
-};
 
 #define ANV_PIPELINE_STATISTICS_MASK 0x000007ff
 
@@ -4478,6 +4499,22 @@ struct anv_query_pool {
    uint32_t                                     n_passes;
    struct intel_perf_query_info                 **pass_query;
 };
+
+struct anv_dynamic_pass_create_info {
+   uint32_t                 viewMask;
+   uint32_t                 colorAttachmentCount;
+   const VkFormat*          pColorAttachmentFormats;
+   VkFormat                 depthAttachmentFormat;
+   VkFormat                 stencilAttachmentFormat;
+   VkSampleCountFlagBits    rasterizationSamples;
+};
+
+void
+anv_dynamic_pass_init(struct anv_dynamic_render_pass *dyn_render_pass,
+                      const struct anv_dynamic_pass_create_info *info);
+void
+anv_dynamic_pass_init_full(struct anv_dynamic_render_pass *dyn_render_pass,
+                           const VkRenderingInfoKHR *info);
 
 static inline uint32_t khr_perf_query_preamble_offset(const struct anv_query_pool *pool,
                                                       uint32_t pass)

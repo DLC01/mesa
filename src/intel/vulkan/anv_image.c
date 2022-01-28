@@ -684,33 +684,6 @@ add_aux_surface_if_supported(struct anv_device *device,
          return VK_SUCCESS;
       }
 
-      if (!isl_format_supports_rendering(&device->info,
-                                         plane_format.isl_format)) {
-         /* Disable CCS because it is not useful (we can't render to the image
-          * with CCS enabled).  While it may be technically possible to enable
-          * CCS for this case, we currently don't have things hooked up to get
-          * it working.
-          */
-         anv_perf_warn(VK_LOG_OBJS(&image->vk.base),
-                       "This image format doesn't support rendering. "
-                       "Not allocating an CCS buffer.");
-         return VK_SUCCESS;
-      }
-
-      if (device->info.ver >= 12 &&
-          (image->vk.array_layers > 1 || image->vk.mip_levels)) {
-         /* HSD 14010672564: On TGL, if a block of fragment shader outputs
-          * match the surface's clear color, the HW may convert them to
-          * fast-clears. Anv only does clear color tracking for the first
-          * slice unfortunately. Disable CCS until anv gains more clear color
-          * tracking abilities.
-          */
-         anv_perf_warn(VK_LOG_OBJS(&image->vk.base),
-                       "HW may put fast-clear blocks on more slices than SW "
-                       "currently tracks. Not allocating a CCS buffer.");
-         return VK_SUCCESS;
-      }
-
       if (INTEL_DEBUG(DEBUG_NO_RBC))
          return VK_SUCCESS;
 
@@ -1638,10 +1611,25 @@ anv_image_get_memory_requirements(struct anv_device *device,
     *    supported memory type for the resource. The bit `1<<i` is set if and
     *    only if the memory type `i` in the VkPhysicalDeviceMemoryProperties
     *    structure for the physical device is supported.
-    *
-    * All types are currently supported for images.
     */
-   uint32_t memory_types = (1ull << device->physical->memory.type_count) - 1;
+   uint32_t memory_types = 0;
+   for (int i = 0; i < device->physical->memory.type_count; i++) {
+      const uint32_t heap_index = device->physical->memory.types[i].heapIndex;
+
+      bool memory_type_supported = true;
+      u_foreach_bit(b, aspects) {
+         VkImageAspectFlagBits aspect = 1 << b;
+         const uint32_t plane = anv_image_aspect_to_plane(image, aspect);
+
+         if (device->info.verx10 >= 125 &&
+             isl_aux_usage_has_ccs(image->planes[plane].aux_usage) &&
+             !device->physical->memory.heaps[heap_index].is_local_mem)
+            memory_type_supported = false;
+      }
+
+      if (memory_type_supported)
+         memory_types |= 1 << i;
+   }
 
    vk_foreach_struct(ext, pMemoryRequirements->pNext) {
       switch (ext->sType) {
@@ -2082,6 +2070,20 @@ anv_layout_to_aux_state(const struct intel_device_info * const devinfo,
    bool aux_supported = true;
    bool clear_supported = isl_aux_usage_has_fast_clears(aux_usage);
 
+   const struct isl_format_layout *fmtl =
+      isl_format_get_layout(image->planes[plane].primary_surface.isl.format);
+
+   /* Disabling CCS for the following case avoids failures in:
+    *    - dEQP-VK.drm_format_modifiers.export_import.*
+    *    - dEQP-VK.synchronization*
+    */
+   if (usage & (VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT) && fmtl->bpb <= 16 &&
+       aux_usage == ISL_AUX_USAGE_CCS_E && devinfo->ver >= 12) {
+      aux_supported = false;
+      clear_supported = false;
+   }
+
    if ((usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) && !read_only) {
       /* This image could be used as both an input attachment and a render
        * target (depth, stencil, or color) at the same time and this can cause
@@ -2297,6 +2299,17 @@ anv_layout_to_fast_clear_type(const struct intel_device_info * const devinfo,
    case ISL_AUX_STATE_PARTIAL_CLEAR:
    case ISL_AUX_STATE_COMPRESSED_CLEAR:
       if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
+         return ANV_FAST_CLEAR_DEFAULT_VALUE;
+      } else if (devinfo->ver >= 12 &&
+                 image->planes[plane].aux_usage == ISL_AUX_USAGE_CCS_E) {
+         /* On TGL, if a block of fragment shader outputs match the surface's
+          * clear color, the HW may convert them to fast-clears (see HSD
+          * 14010672564). This can lead to rendering corruptions if not
+          * handled properly. We restrict the clear color to zero to avoid
+          * issues that can occur with: 
+          *     - Texture view rendering (including blorp_copy calls)
+          *     - Images with multiple levels or array layers
+          */
          return ANV_FAST_CLEAR_DEFAULT_VALUE;
       } else if (layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
          /* When we're in a render pass we have the clear color data from the

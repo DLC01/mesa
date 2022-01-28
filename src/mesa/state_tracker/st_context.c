@@ -29,6 +29,7 @@
 #include "main/accum.h"
 #include "main/context.h"
 #include "main/debug_output.h"
+#include "main/framebuffer.h"
 #include "main/glthread.h"
 #include "main/shaderobj.h"
 #include "main/state.h"
@@ -46,7 +47,6 @@
 #include "st_cb_drawtex.h"
 #include "st_cb_eglimage.h"
 #include "st_cb_feedback.h"
-#include "st_cb_program.h"
 #include "st_cb_flush.h"
 #include "st_atom.h"
 #include "st_draw.h"
@@ -73,18 +73,12 @@ DEBUG_GET_ONCE_BOOL_OPTION(mesa_mvp_dp4, "MESA_MVP_DP4", FALSE)
 static uint64_t
 st_get_active_states(struct gl_context *ctx)
 {
-   struct st_program *vp =
-      st_program(ctx->VertexProgram._Current);
-   struct st_program *tcp =
-      st_program(ctx->TessCtrlProgram._Current);
-   struct st_program *tep =
-      st_program(ctx->TessEvalProgram._Current);
-   struct st_program *gp =
-      st_program(ctx->GeometryProgram._Current);
-   struct st_program *fp =
-      st_program(ctx->FragmentProgram._Current);
-   struct st_program *cp =
-      st_program(ctx->ComputeProgram._Current);
+   struct gl_program *vp = ctx->VertexProgram._Current;
+   struct gl_program *tcp = ctx->TessCtrlProgram._Current;
+   struct gl_program *tep = ctx->TessEvalProgram._Current;
+   struct gl_program *gp = ctx->GeometryProgram._Current;
+   struct gl_program *fp = ctx->FragmentProgram._Current;
+   struct gl_program *cp = ctx->ComputeProgram._Current;
    uint64_t active_shader_states = 0;
 
    if (vp)
@@ -199,9 +193,9 @@ st_invalidate_state(struct gl_context *ctx)
                     ST_NEW_SAMPLERS |
                     ST_NEW_IMAGE_UNITS);
       if (ctx->FragmentProgram._Current) {
-         struct st_program *stfp = st_program(ctx->FragmentProgram._Current);
+         struct gl_program *fp = ctx->FragmentProgram._Current;
 
-         if (stfp->Base.ExternalSamplersUsed || stfp->ati_fs)
+         if (fp->ExternalSamplersUsed || fp->ati_fs)
             st->dirty |= ST_NEW_FS_STATE;
       }
    }
@@ -437,10 +431,9 @@ st_init_driver_flags(struct st_context *st)
       f->NewFragClamp = ST_NEW_RASTERIZER;
    }
 
+   f->NewClipPlaneEnable = ST_NEW_RASTERIZER;
    if (st->lower_ucp)
-      f->NewClipPlaneEnable = ST_NEW_VS_STATE | ST_NEW_GS_STATE;
-   else
-      f->NewClipPlaneEnable = ST_NEW_RASTERIZER;
+      f->NewClipPlaneEnable |= ST_NEW_VS_STATE | ST_NEW_GS_STATE | ST_NEW_TES_STATE;
 
    if (st->emulate_gl_clamp)
       f->NewSamplersWithClamp = ST_NEW_SAMPLERS |
@@ -475,7 +468,7 @@ st_have_perfquery(struct st_context *ctx)
 
 static struct st_context *
 st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
-                       const struct st_config_options *options, bool no_error)
+                       const struct st_config_options *options)
 {
    struct pipe_screen *screen = pipe->screen;
    uint i;
@@ -550,9 +543,6 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
       st->util_velems.velems[2].vertex_buffer_index = 0;
       st->util_velems.velems[2].src_format = PIPE_FORMAT_R32G32_FLOAT;
    }
-
-   if (no_error)
-      ctx->Const.ContextFlags |= GL_CONTEXT_FLAG_NO_ERROR_BIT_KHR;
 
    ctx->Const.PackedDriverUniformStorage =
       screen->get_param(screen, PIPE_CAP_PACKED_UNIFORMS);
@@ -821,7 +811,7 @@ st_init_driver_functions(struct pipe_screen *screen,
 
    st_init_eglimage_functions(functions, has_egl_image_validate);
 
-   st_init_program_functions(functions);
+   functions->NewProgram = _mesa_new_program;
    st_init_flush_functions(screen, functions);
 
    /* GL_ARB_get_program_binary */
@@ -870,7 +860,7 @@ st_create_context(gl_api api, struct pipe_context *pipe,
    ctx->pipe = pipe;
    ctx->screen = pipe->screen;
 
-   if (!_mesa_initialize_context(ctx, api, visual, shareCtx, &funcs)) {
+   if (!_mesa_initialize_context(ctx, api, no_error, visual, shareCtx, &funcs)) {
       align_free(ctx);
       return NULL;
    }
@@ -889,7 +879,7 @@ st_create_context(gl_api api, struct pipe_context *pipe,
    if (pipe->screen->get_param(pipe->screen, PIPE_CAP_INVALIDATE_BUFFER))
       ctx->has_invalidate_buffer = true;
 
-   st = st_create_context_priv(ctx, pipe, options, no_error);
+   st = st_create_context_priv(ctx, pipe, options);
    if (!st) {
       _mesa_free_context_data(ctx, true);
       align_free(ctx);
@@ -933,7 +923,7 @@ void
 st_destroy_context(struct st_context *st)
 {
    struct gl_context *ctx = st->ctx;
-   struct st_framebuffer *stfb, *next;
+   struct gl_framebuffer *stfb, *next;
    struct gl_framebuffer *save_drawbuffer;
    struct gl_framebuffer *save_readbuffer;
 
@@ -983,7 +973,7 @@ st_destroy_context(struct st_context *st)
 
    /* release framebuffer in the winsys buffers list */
    LIST_FOR_EACH_ENTRY_SAFE_REV(stfb, next, &st->winsys_buffers, head) {
-      st_framebuffer_reference(&stfb, NULL);
+      _mesa_reference_framebuffer(&stfb, NULL);
    }
 
    _mesa_HashWalk(ctx->Shared->FrameBuffers, destroy_framebuffer_attachment_sampler_cb, st);

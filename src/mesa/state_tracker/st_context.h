@@ -186,10 +186,6 @@ struct st_context
    boolean emulate_gl_clamp;
    boolean texture_buffer_sampler;
 
-   /* On old libGL's for linux we need to invalidate the drawables
-    * on glViewpport calls, this is set via a option.
-    */
-   boolean invalidate_on_gl_viewport;
    boolean draw_needs_minmax_index;
    boolean has_hw_atomics;
 
@@ -259,12 +255,12 @@ struct st_context
 
    union {
       struct {
-         struct st_program *vp;    /**< Currently bound vertex program */
-         struct st_program *tcp; /**< Currently bound tess control program */
-         struct st_program *tep; /**< Currently bound tess eval program */
-         struct st_program *gp;  /**< Currently bound geometry program */
-         struct st_program *fp;  /**< Currently bound fragment program */
-         struct st_program *cp;   /**< Currently bound compute program */
+         struct gl_program *vp;    /**< Currently bound vertex program */
+         struct gl_program *tcp; /**< Currently bound tess control program */
+         struct gl_program *tep; /**< Currently bound tess eval program */
+         struct gl_program *gp;  /**< Currently bound geometry program */
+         struct gl_program *fp;  /**< Currently bound fragment program */
+         struct gl_program *cp;   /**< Currently bound compute program */
       };
       struct gl_program *current_program[MESA_SHADER_STAGES];
    };
@@ -430,25 +426,6 @@ st_context_free_zombie_objects(struct st_context *st);
 const struct nir_shader_compiler_options *
 st_get_nir_compiler_options(struct st_context *st, gl_shader_stage stage);
 
-
-/**
- * Wrapper for struct gl_framebuffer.
- * This is an opaque type to the outside world.
- */
-struct st_framebuffer
-{
-   struct gl_framebuffer Base;
-
-   struct st_framebuffer_iface *iface;
-   enum st_attachment_type statts[ST_ATTACHMENT_COUNT];
-   unsigned num_statts;
-   int32_t stamp;
-   int32_t iface_stamp;
-   uint32_t iface_ID;
-
-   /* list of framebuffer objects */
-   struct list_head head;
-};
 
 void st_invalidate_state(struct gl_context *ctx);
 void st_set_background_context(struct gl_context *ctx,

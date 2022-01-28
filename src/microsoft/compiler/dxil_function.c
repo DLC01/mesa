@@ -74,6 +74,7 @@ static struct  predefined_func_descr predefined_funcs[] = {
 {"dx.op.primitiveID", "i", "i", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.outputControlPointID", "i", "i", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.gsInstanceID", "i", "i", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.domainLocation", "f", "ii", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.legacyF16ToF32", "f", "ii", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.legacyF32ToF16", "i", "if", DXIL_ATTR_KIND_READ_ONLY},
 {"dx.op.makeDouble", "g", "iii", DXIL_ATTR_KIND_READ_NONE},
@@ -84,6 +85,9 @@ static struct  predefined_func_descr predefined_funcs[] = {
 {"dx.op.evalCentroid", "O", "iiic", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.evalSampleIndex", "O", "iiici", DXIL_ATTR_KIND_READ_NONE},
 {"dx.op.coverage", "i", "i", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.storePatchConstant", "v", "iiicO", DXIL_ATTR_KIND_NO_UNWIND},
+{"dx.op.loadPatchConstant", "O", "iiic", DXIL_ATTR_KIND_READ_NONE},
+{"dx.op.loadOutputControlPoint", "O", "iiici", DXIL_ATTR_KIND_READ_NONE},
 };
 
 struct func_descr {
@@ -130,7 +134,7 @@ allocate_function_from_predefined(struct dxil_module *mod,
                                 predefined_funcs[i].attr);
       }
    }
-   return false;
+   unreachable("Invalid function name");
 }
 
 const struct dxil_func *

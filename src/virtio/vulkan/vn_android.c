@@ -515,9 +515,12 @@ vn_android_image_from_anb(struct vn_device *dev,
    if (result != VK_SUCCESS)
       goto fail;
 
-   img->is_wsi = true;
+   img->wsi.is_wsi = true;
+   img->wsi.tiling_override = builder.create.tiling;
+   img->wsi.drm_format_modifier = builder.modifier.drmFormatModifier;
    /* Android WSI image owns the memory */
-   img->private_memory = memory;
+   img->wsi.memory = vn_device_memory_from_handle(memory);
+   img->wsi.memory_owned = true;
    *out_img = img;
 
    return VK_SUCCESS;
@@ -1005,8 +1008,9 @@ vn_android_device_import_ahb(struct vn_device *dev,
       }
 
       /* XXX Workaround before we use cross-domain backend in minigbm. The
-       * blob_mem allocated from virgl backend can have a queried guest mappable
-       * size smaller than the size returned from image memory requirement.
+       * blob_mem allocated from virgl backend can have a queried guest
+       * mappable size smaller than the size returned from image memory
+       * requirement.
        */
       force_unmappable = true;
    }

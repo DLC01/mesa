@@ -771,6 +771,7 @@ debian-testing-asan:
     EXTRA_OPTION: >
       -D b_sanitize=address
       -D valgrind=false
+      -D tools=dlclose-skip
     MINIO_ARTIFACT_NAME: ""
     ARTIFACTS_DEBUG_SYMBOLS: 1
 
@@ -927,12 +928,10 @@ debian-android:
       -Wno-error=asm-operand-widths
       -Wno-error=constant-conversion
       -Wno-error=enum-conversion
-      -Wno-error=extern-initializer
       -Wno-error=initializer-overrides
       -Wno-error=missing-braces
       -Wno-error=sometimes-uninitialized
       -Wno-error=unused-function
-      -Wno-error=unused-label
     CPP_ARGS: >
       -Wno-error=deprecated-declarations
     DRI_LOADERS: >
@@ -1037,6 +1036,7 @@ debian-arm64-asan:
       -D llvm=disabled
       -D b_sanitize=address
       -D valgrind=false
+      -D tools=dlclose-skip
     ARTIFACTS_DEBUG_SYMBOLS: 1
     MINIO_ARTIFACT_NAME: mesa-arm64-asan
     MESON_TEST_ARGS: "--no-suite mesa:compiler"
@@ -1262,16 +1262,16 @@ debian-mingw32-x86_64:
 
 .piglit-test:
   artifacts:
-    when: on_failure
     name: "mesa_${CI_JOB_NAME}"
     paths:
-      - results/summary/
-      - results/*.txt
+      - results
+    reports:
+      junit: results/junit.xml
   variables:
     PIGLIT_NO_WINDOW: 1
-    CI_JOB_JWT_FILE: /minio_jwt  # JWT file on piglit jobs should be available on / partition
+    HWCI_TEST_SCRIPT: "/install/piglit/piglit-runner.sh"
   script:
-    - install/piglit/run.sh
+    - install/piglit/piglit-runner.sh
 
 .piglit-traces-test:
   extends:
@@ -1285,12 +1285,15 @@ debian-mingw32-x86_64:
     name: "mesa_${CI_JOB_NAME}"
     reports:
       junit: results/junit.xml
+    paths:
+      - results/summary/
+      - results/*.txt
   variables:
     CI_JOB_JWT_FILE: /minio_jwt  # JWT file on piglit jobs should be available on / partition
-    PIGLIT_PROFILES: replay
-    PIGLIT_REPLAY_UPLOAD_TO_MINIO: 1
     PIGLIT_REPLAY_EXTRA_ARGS:  --keep-image --db-path ${CI_PROJECT_DIR}/replayer-db/ --minio_host=minio-packet.freedesktop.org --minio_bucket=mesa-tracie-public --role-session-name=${CI_PROJECT_PATH}:${CI_JOB_ID} --jwt-file=${CI_JOB_JWT_FILE}
-    PIGLIT_JUNIT_RESULTS: 1
+    CI_JOB_JWT_FILE: /minio_jwt  # JWT file on piglit jobs should be available on / partition
+  script:
+    - install/piglit/piglit-traces.sh
 
 .deqp-test:
   script:
@@ -1388,7 +1391,7 @@ debian-mingw32-x86_64:
 
 .baremetal-arm64-asan-test:
   variables:
-    DEQP_RUNNER_OPTIONS: "--env LD_PRELOAD=libasan.so.6"
+    DEQP_RUNNER_OPTIONS: "--env LD_PRELOAD=libasan.so.6:/install/lib/libdlclose-skip.so"
     MINIO_ARTIFACT_NAME: mesa-arm64-asan
   needs:
     - debian/arm_test

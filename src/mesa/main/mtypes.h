@@ -60,6 +60,8 @@
 
 #include "pipe/p_state.h"
 
+#include "frontend/api.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -2548,6 +2550,31 @@ struct gl_renderbuffer
                              struct gl_renderbuffer *rb,
                              GLenum internalFormat,
                              GLuint width, GLuint height);
+
+   struct pipe_resource *texture;
+   /* This points to either "surface_linear" or "surface_srgb".
+    * It doesn't hold the pipe_surface reference. The other two do.
+    */
+   struct pipe_surface *surface;
+   struct pipe_surface *surface_linear;
+   struct pipe_surface *surface_srgb;
+   GLboolean defined;        /**< defined contents? */
+
+   struct pipe_transfer *transfer; /**< only used when mapping the resource */
+
+   /**
+    * Used only when hardware accumulation buffers are not supported.
+    */
+   boolean software;
+   void *data;
+
+   bool use_readpix_cache;
+
+   /* Inputs from Driver.RenderTexture, don't use directly. */
+   boolean is_rtt; /**< whether Driver.RenderTexture was called */
+   unsigned rtt_face, rtt_slice;
+   boolean rtt_layered; /**< whether glFramebufferTexture was called */
+   unsigned rtt_nr_samples; /**< from FramebufferTexture2DMultisampleEXT */
 };
 
 
@@ -2706,6 +2733,16 @@ struct gl_framebuffer
 
    /** Delete this framebuffer */
    void (*Delete)(struct gl_framebuffer *fb);
+
+   struct st_framebuffer_iface *iface;
+   enum st_attachment_type statts[ST_ATTACHMENT_COUNT];
+   unsigned num_statts;
+   int32_t stamp;
+   int32_t iface_stamp;
+   uint32_t iface_ID;
+
+   /* list of framebuffer objects */
+   struct list_head head;
 };
 
 /**
@@ -3548,6 +3585,11 @@ struct gl_context
    struct st_config_options *st_opts;
    struct cso_context *cso_context;
    bool has_invalidate_buffer;
+   /* On old libGL's for linux we need to invalidate the drawables
+    * on glViewpport calls, this is set via a option.
+    */
+   bool invalidate_on_gl_viewport;
+
    /*@}*/
 
    /**

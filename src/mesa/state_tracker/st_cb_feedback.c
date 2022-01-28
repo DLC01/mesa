@@ -40,6 +40,7 @@
 
 #include "main/context.h"
 #include "main/feedback.h"
+#include "main/framebuffer.h"
 #include "main/varray.h"
 
 #include "util/u_memory.h"
@@ -86,13 +87,13 @@ feedback_vertex(struct gl_context *ctx, const struct draw_context *draw,
                 const struct vertex_header *v)
 {
    const struct st_context *st = st_context(ctx);
-   struct st_vertex_program *stvp = (struct st_vertex_program *)st->vp;
+   struct gl_vertex_program *stvp = (struct gl_vertex_program *)st->vp;
    GLfloat win[4];
    const GLfloat *color, *texcoord;
    ubyte slot;
 
    win[0] = v->data[0][0];
-   if (st_fb_orientation(ctx->DrawBuffer) == Y_0_TOP)
+   if (_mesa_fb_orientation(ctx->DrawBuffer) == Y_0_TOP)
       win[1] = ctx->DrawBuffer->Height - v->data[0][1];
    else
       win[1] = v->data[0][1];
@@ -308,6 +309,6 @@ st_RenderMode(struct gl_context *ctx, GLenum newMode )
       ctx->Driver.DrawGalliumMultiMode = _mesa_draw_gallium_multimode_fallback;
       /* need to generate/use a vertex program that emits pos/color/tex */
       if (vp)
-         st->dirty |= ST_NEW_VERTEX_PROGRAM(st, st_program(vp));
+         st->dirty |= ST_NEW_VERTEX_PROGRAM(st, vp);
    }
 }

@@ -40,19 +40,17 @@ if [ "$VK_DRIVER" ]; then
     # Set the Vulkan driver to use.
     export VK_ICD_FILENAMES="$INSTALL/share/vulkan/icd.d/${VK_DRIVER}_icd.x86_64.json"
 
-    if [ "x$PIGLIT_PROFILES" = "xreplay" ]; then
-        # Set environment for Wine.
-        export WINEDEBUG="-all"
-        export WINEPREFIX="/dxvk-wine64"
-        export WINEESYNC=1
+    # Set environment for Wine.
+    export WINEDEBUG="-all"
+    export WINEPREFIX="/dxvk-wine64"
+    export WINEESYNC=1
 
-        # Set environment for DXVK.
-        export DXVK_LOG_LEVEL="none"
-        export DXVK_STATE_CACHE=0
+    # Set environment for DXVK.
+    export DXVK_LOG_LEVEL="none"
+    export DXVK_STATE_CACHE=0
 
-        # Set environment for gfxreconstruct executables.
-        export PATH="/gfxreconstruct/build/bin:$PATH"
-    fi
+    # Set environment for gfxreconstruct executables.
+    export PATH="/gfxreconstruct/build/bin:$PATH"
 
     SANITY_MESA_VERSION_CMD="vulkaninfo"
 
@@ -77,14 +75,12 @@ else
 
     ### GL/ES ###
 
-    if [ "x$PIGLIT_PROFILES" = "xreplay" ]; then
-        # Set environment for apitrace executable.
-        export PATH="/apitrace/build:$PATH"
+    # Set environment for apitrace executable.
+    export PATH="/apitrace/build:$PATH"
 
-        # Our rootfs may not have "less", which apitrace uses during
-        # apitrace dump
-        export PAGER=cat
-    fi
+    # Our rootfs may not have "less", which apitrace uses during
+    # apitrace dump
+    export PAGER=cat
 
     SANITY_MESA_VERSION_CMD="wflinfo"
 
@@ -132,13 +128,6 @@ fi
 # If the job is parallel at the  gitlab job level, will take the corresponding
 # fraction of the caselist.
 if [ -n "$CI_NODE_INDEX" ]; then
-
-    if [ "$PIGLIT_PROFILES" != "${PIGLIT_PROFILES% *}" ]; then
-        FAILURE_MESSAGE=$(printf "%s" "Can't parallelize piglit with multiple profiles")
-        quiet print_red printf "%s\n" "$FAILURE_MESSAGE"
-        exit 1
-    fi
-
     USE_CASELIST=1
 fi
 
@@ -175,7 +164,7 @@ cd /piglit
 
 if [ -n "$USE_CASELIST" ]; then
     PIGLIT_TESTS=$(printf "%s" "$PIGLIT_TESTS")
-    PIGLIT_GENTESTS="./piglit print-cmd $PIGLIT_TESTS $PIGLIT_PROFILES --format \"{name}\" > /tmp/case-list.txt"
+    PIGLIT_GENTESTS="./piglit print-cmd $PIGLIT_TESTS replay --format \"{name}\" > /tmp/case-list.txt"
     RUN_GENTESTS="export LD_LIBRARY_PATH=$__LD_LIBRARY_PATH; $PIGLIT_GENTESTS"
 
     eval $RUN_GENTESTS
@@ -189,7 +178,7 @@ PIGLIT_OPTIONS=$(printf "%s" "$PIGLIT_OPTIONS")
 
 PIGLIT_TESTS=$(printf "%s" "$PIGLIT_TESTS")
 
-PIGLIT_CMD="./piglit run --timeout 300 -j${FDO_CI_CONCURRENT:-4} $PIGLIT_OPTIONS $PIGLIT_TESTS $PIGLIT_PROFILES "$(/usr/bin/printf "%q" "$RESULTS")
+PIGLIT_CMD="./piglit run --timeout 300 -j${FDO_CI_CONCURRENT:-4} $PIGLIT_OPTIONS $PIGLIT_TESTS replay "$(/usr/bin/printf "%q" "$RESULTS")
 
 RUN_CMD="export LD_LIBRARY_PATH=$__LD_LIBRARY_PATH; $SANITY_MESA_VERSION_CMD && $HANG_DETECTION_CMD $PIGLIT_CMD"
 
@@ -197,12 +186,7 @@ if [ "$RUN_CMD_WRAPPER" ]; then
     RUN_CMD="set +e; $RUN_CMD_WRAPPER "$(/usr/bin/printf "%q" "$RUN_CMD")"; set -e"
 fi
 
-FAILURE_MESSAGE=$(printf "%s" "Unexpected change in results:")
-
-if [ "x$PIGLIT_PROFILES" = "xreplay" ] \
-       && [ ${PIGLIT_REPLAY_UPLOAD_TO_MINIO:-0} -eq 1 ]; then
-    ci-fairy minio login $MINIO_ARGS --token-file "${CI_JOB_JWT_FILE}"
-fi
+ci-fairy minio login $MINIO_ARGS --token-file "${CI_JOB_JWT_FILE}"
 
 eval $RUN_CMD
 
@@ -212,12 +196,9 @@ fi
 
 ARTIFACTS_BASE_URL="https://${CI_PROJECT_ROOT_NAMESPACE}.${CI_PAGES_DOMAIN}/-/${CI_PROJECT_NAME}/-/jobs/${CI_JOB_ID}/artifacts"
 
-if [ ${PIGLIT_JUNIT_RESULTS:-0} -eq 1 ]; then
-    ./piglit summary aggregate "$RESULTS" -o junit.xml
-    FAILURE_MESSAGE=$(printf "${FAILURE_MESSAGE}\n%s" "Check the JUnit report for failures at: ${ARTIFACTS_BASE_URL}/results/junit.xml")
-fi
+./piglit summary aggregate "$RESULTS" -o junit.xml
 
-PIGLIT_RESULTS="${PIGLIT_RESULTS:-$PIGLIT_PROFILES}"
+PIGLIT_RESULTS="${PIGLIT_RESULTS:-replay}"
 RESULTSFILE="$RESULTS/$PIGLIT_RESULTS.txt"
 mkdir -p .gitlab-ci/piglit
 ./piglit summary console "$RESULTS"/results.json.bz2 \
@@ -226,49 +207,28 @@ mkdir -p .gitlab-ci/piglit
     | sed '/^summary:/Q' \
     > $RESULTSFILE
 
-if [ "x$PIGLIT_PROFILES" = "xreplay" ] \
-       && [ ${PIGLIT_REPLAY_UPLOAD_TO_MINIO:-0} -eq 1 ]; then
+__PREFIX="trace/$PIGLIT_REPLAY_DEVICE_NAME"
+__MINIO_PATH="$PIGLIT_REPLAY_ARTIFACTS_BASE_URL"
+__MINIO_TRACES_PREFIX="traces"
 
-    __PREFIX="trace/$PIGLIT_REPLAY_DEVICE_NAME"
-    __MINIO_PATH="$PIGLIT_REPLAY_ARTIFACTS_BASE_URL"
-    __MINIO_TRACES_PREFIX="traces"
-
-    if [ "x$PIGLIT_REPLAY_SUBCOMMAND" != "xprofile" ]; then
-        quiet replay_minio_upload_images
-    fi
+if [ "x$PIGLIT_REPLAY_SUBCOMMAND" != "xprofile" ]; then
+    quiet replay_minio_upload_images
 fi
 
-if [ -n "$USE_CASELIST" ]; then
-    # Just filter the expected results based on the tests that were actually
-    # executed, and switch to the version with no summary
-    cat ".gitlab-ci/piglit/$PIGLIT_RESULTS.txt.orig" | sed '/^summary:/Q' | rev \
-        | cut -f2- -d: | rev | sed "s/$/:/g" > /tmp/executed.txt
 
-    grep -F -f /tmp/executed.txt "$INSTALL/$PIGLIT_RESULTS.txt" \
-       > ".gitlab-ci/piglit/$PIGLIT_RESULTS.txt.baseline" || true
-elif [ -f "$INSTALL/$PIGLIT_RESULTS.txt" ]; then
-    cp "$INSTALL/$PIGLIT_RESULTS.txt" \
-       ".gitlab-ci/piglit/$PIGLIT_RESULTS.txt.baseline"
-else
-    touch ".gitlab-ci/piglit/$PIGLIT_RESULTS.txt.baseline"
-fi
-
-if diff -q ".gitlab-ci/piglit/$PIGLIT_RESULTS.txt.baseline" $RESULTSFILE; then
+if [ ! -s $RESULTSFILE ]; then
     exit 0
 fi
 
 ./piglit summary html --exclude-details=pass \
 "$RESULTS"/summary "$RESULTS"/results.json.bz2
 
-if [ "x$PIGLIT_PROFILES" = "xreplay" ]; then
 find "$RESULTS"/summary -type f -name "*.html" -print0 \
         | xargs -0 sed -i 's%<img src="file://'"${RESULTS}"'.*-\([0-9a-f]*\)\.png%<img src="https://'"${JOB_ARTIFACTS_BASE}"'/traces/\1.png%g'
 find "$RESULTS"/summary -type f -name "*.html" -print0 \
         | xargs -0 sed -i 's%<img src="file://%<img src="https://'"${PIGLIT_REPLAY_REFERENCE_IMAGES_BASE}"'/%g'
-fi
 
-FAILURE_MESSAGE=$(printf "${FAILURE_MESSAGE}\n%s" "Check the HTML summary for problems at: ${ARTIFACTS_BASE_URL}/results/summary/problems.html")
-
-quiet print_red printf "%s\n" "$FAILURE_MESSAGE"
-quiet diff --color=always -u ".gitlab-ci/piglit/$PIGLIT_RESULTS.txt.baseline" $RESULTSFILE
+quiet print_red echo "Failures in traces:"
+cat $RESULTSFILE
+quiet print_red echo "Review the image changes and get the new checksums at: ${ARTIFACTS_BASE_URL}/results/summary/problems.html"
 exit 1

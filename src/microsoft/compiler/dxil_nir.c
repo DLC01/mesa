@@ -1195,15 +1195,23 @@ dxil_nir_split_clip_cull_distance_instr(nir_builder *b,
    /* The deref chain to the clip/cull variables should be simple, just the
     * var and an array with a constant index, otherwise more lowering/optimization
     * might be needed before this pass, e.g. copy prop, lower_io_to_temporaries,
-    * split_var_copies, and/or lower_var_copies
+    * split_var_copies, and/or lower_var_copies. In the case of arrayed I/O like
+    * inputs to the tessellation or geometry stages, there might be a second level
+    * of array index.
     */
    assert(deref->deref_type == nir_deref_type_var ||
           deref->deref_type == nir_deref_type_array);
 
    b->cursor = nir_before_instr(instr);
+   unsigned arrayed_io_length = 0;
+   const struct glsl_type *old_type = var->type;
+   if (nir_is_arrayed_io(var, b->shader->info.stage)) {
+      arrayed_io_length = glsl_array_size(old_type);
+      old_type = glsl_get_array_element(old_type);
+   }
    if (!new_var) {
       /* Update lengths for new and old vars */
-      int old_length = glsl_array_size(var->type);
+      int old_length = glsl_array_size(old_type);
       int new_length = (old_length + var->data.location_frac) - 4;
       old_length -= new_length;
 
@@ -1213,9 +1221,13 @@ dxil_nir_split_clip_cull_distance_instr(nir_builder *b,
 
       new_var = nir_variable_clone(var, params->shader);
       nir_shader_add_variable(params->shader, new_var);
-      assert(glsl_get_base_type(glsl_get_array_element(var->type)) == GLSL_TYPE_FLOAT);
+      assert(glsl_get_base_type(glsl_get_array_element(old_type)) == GLSL_TYPE_FLOAT);
       var->type = glsl_array_type(glsl_float_type(), old_length, 0);
       new_var->type = glsl_array_type(glsl_float_type(), new_length, 0);
+      if (arrayed_io_length) {
+         var->type = glsl_array_type(var->type, arrayed_io_length, 0);
+         new_var->type = glsl_array_type(new_var->type, arrayed_io_length, 0);
+      }
       new_var->data.location++;
       new_var->data.location_frac = 0;
       params->new_var = new_var;
@@ -1226,6 +1238,14 @@ dxil_nir_split_clip_cull_distance_instr(nir_builder *b,
       deref->type = var->type;
       return false;
    }
+
+   if (glsl_type_is_array(deref->type)) {
+      assert(arrayed_io_length > 0);
+      deref->type = glsl_get_array_element(var->type);
+      return false;
+   }
+
+   assert(glsl_get_base_type(deref->type) == GLSL_TYPE_FLOAT);
 
    nir_const_value *index = nir_src_as_const_value(deref->arr.index);
    assert(index);
@@ -1240,7 +1260,13 @@ dxil_nir_split_clip_cull_distance_instr(nir_builder *b,
       return false;
 
    nir_deref_instr *new_var_deref = nir_build_deref_var(b, new_var);
-   nir_deref_instr *new_array_deref = nir_build_deref_array(b, new_var_deref, nir_imm_int(b, total_index % 4));
+   nir_deref_instr *new_intermediate_deref = new_var_deref;
+   if (arrayed_io_length) {
+      nir_deref_instr *parent = nir_src_as_deref(deref->parent);
+      assert(parent->deref_type == nir_deref_type_array);
+      new_intermediate_deref = nir_build_deref_array(b, new_intermediate_deref, parent->arr.index.ssa);
+   }
+   nir_deref_instr *new_array_deref = nir_build_deref_array(b, new_intermediate_deref, nir_imm_int(b, total_index % 4));
    nir_ssa_def_rewrite_uses(&deref->dest.ssa, &new_array_deref->dest.ssa);
    return true;
 }
@@ -1722,12 +1748,20 @@ dxil_nir_lower_sysval_to_load_input(nir_shader *s, nir_variable **sysval_vars)
 static int
 variable_location_cmp(const nir_variable* a, const nir_variable* b)
 {
-   // Sort by driver_location, location, then index
+   // Sort by driver_location, location, location_frac, then index
+   unsigned a_location = a->data.location;
+   if (a_location >= VARYING_SLOT_PATCH0)
+      a_location -= VARYING_SLOT_PATCH0;
+   unsigned b_location = b->data.location;
+   if (b_location >= VARYING_SLOT_PATCH0)
+      b_location -= VARYING_SLOT_PATCH0;
    return a->data.driver_location != b->data.driver_location ?
             a->data.driver_location - b->data.driver_location : 
-            a->data.location !=  b->data.location ?
-               a->data.location - b->data.location :
-               a->data.index - b->data.index;
+            a_location !=  b_location ?
+               a_location - b_location :
+               a->data.location_frac != b->data.location_frac ?
+                  a->data.location_frac - b->data.location_frac :
+                  a->data.index - b->data.index;
 }
 
 /* Order varyings according to driver location */
@@ -1792,10 +1826,13 @@ dxil_reassign_driver_locations(nir_shader* s, nir_variable_mode modes,
    nir_sort_variables_with_modes(s, variable_location_cmp, modes);
 
    uint64_t result = 0;
-   unsigned driver_loc = 0;
+   unsigned driver_loc = 0, driver_patch_loc = 0;
    nir_foreach_variable_with_modes(var, s, modes) {
-      result |= 1ull << var->data.location;
-      var->data.driver_location = driver_loc++;
+      if (var->data.location < 64)
+         result |= 1ull << var->data.location;
+      /* Overlap patches with non-patch */
+      var->data.driver_location = var->data.patch ?
+         driver_patch_loc++ : driver_loc++;
    }
    return result;
 }

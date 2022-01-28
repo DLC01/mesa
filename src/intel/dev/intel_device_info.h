@@ -70,6 +70,7 @@ enum intel_platform {
    INTEL_PLATFORM_RKL,
    INTEL_PLATFORM_DG1,
    INTEL_PLATFORM_ADL,
+   INTEL_PLATFORM_RPL,
    INTEL_PLATFORM_GROUP_START(DG2, INTEL_PLATFORM_DG2_G10),
    INTEL_PLATFORM_GROUP_END(DG2, INTEL_PLATFORM_DG2_G11),
 };
@@ -126,6 +127,12 @@ struct intel_device_info
    bool has_surface_tile_offset;
    bool supports_simd16_3src;
    bool disable_ccs_repack;
+
+   /**
+    * True if CCS uses a flat virtual address translation to a memory
+    * carve-out, rather than aux map translations, or additional surfaces.
+    */
+   bool has_flat_ccs;
    bool has_aux_map;
    bool has_tiling_uapi;
    bool has_ray_tracing;

@@ -1273,6 +1273,8 @@ struct isl_device {
       uint32_t internal;
       uint32_t external;
       uint32_t l1_hdc_l3_llc;
+      uint32_t blitter_src;
+      uint32_t blitter_dst;
    } mocs;
 };
 
@@ -1628,6 +1630,13 @@ struct isl_surf_fill_state_info {
    const struct isl_surf *aux_surf;
    enum isl_aux_usage aux_usage;
    uint64_t aux_address;
+
+   /**
+    * The format to use for decoding media compression.
+    *
+    * Used together with the surface format.
+    */
+   enum isl_format mc_format;
 
    /**
     * The clear color for this surface

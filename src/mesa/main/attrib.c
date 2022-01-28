@@ -61,8 +61,7 @@
 #include "api_exec_decl.h"
 
 #include "state_tracker/st_cb_texture.h"
-#include "state_tracker/st_cb_viewport.h"
-#include "state_tracker/st_context.h"
+#include "state_tracker/st_manager.h"
 #include "state_tracker/st_sampler_view.h"
 
 static inline bool
@@ -1093,7 +1092,8 @@ _mesa_PopAttrib(void)
 
             memcpy(&ctx->ViewportArray[i].X, &vp->X, sizeof(float) * 6);
 
-            st_viewport(ctx);
+            if (ctx->invalidate_on_gl_viewport)
+               st_manager_invalidate_drawables(ctx);
          }
       }
 

@@ -765,6 +765,11 @@ struct v3dv_framebuffer {
 
    uint32_t attachment_count;
    uint32_t color_attachment_count;
+
+   /* Notice that elements in 'attachments' will be NULL if the framebuffer
+    * was created imageless. The driver is expected to access attachment info
+    * from the command buffer state instead.
+    */
    struct v3dv_image_view *attachments[0];
 };
 
@@ -785,10 +790,6 @@ struct v3dv_frame_tiling {
    uint32_t frame_width_in_supertiles;
    uint32_t frame_height_in_supertiles;
 };
-
-void v3dv_framebuffer_compute_internal_bpp_msaa(const struct v3dv_framebuffer *framebuffer,
-                                                const struct v3dv_subpass *subpass,
-                                                uint8_t *max_bpp, bool *msaa);
 
 bool v3dv_subpass_area_is_tile_aligned(struct v3dv_device *device,
                                        const VkRect2D *area,
@@ -839,6 +840,11 @@ struct v3dv_cmd_buffer_attachment_state {
 
    /* The hardware clear value */
    union v3dv_clear_value clear_value;
+
+   /* The underlying image view (from the framebuffer or, if imageless
+    * framebuffer is used, from VkRenderPassAttachmentBeginInfo.
+    */
+   struct v3dv_image_view *image_view;
 };
 
 struct v3dv_viewport_state {

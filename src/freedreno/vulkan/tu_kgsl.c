@@ -657,9 +657,17 @@ tu_device_wait_u_trace(struct tu_device *dev, struct tu_u_trace_syncobj *syncobj
 }
 
 int
-tu_drm_get_timestamp(struct tu_physical_device *device, uint64_t *ts)
+tu_device_get_gpu_timestamp(struct tu_device *dev, uint64_t *ts)
 {
-   tu_finishme("tu_drm_get_timestamp");
+   tu_finishme("tu_device_get_gpu_timestamp");
+   return 0;
+}
+
+int
+tu_device_get_suspend_count(struct tu_device *dev, uint64_t *suspend_count)
+{
+   /* kgsl doesn't have a way to get it */
+   *suspend_count = 0;
    return 0;
 }
 

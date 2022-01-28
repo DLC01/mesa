@@ -380,6 +380,18 @@ fill_graphics_state_vars(struct d3d12_context *ctx,
          ptr[1] = fui(ctx->viewport_states[0].translate[2] - ctx->viewport_states[0].scale[2]);
          size += 4;
          break;
+      case D3D12_STATE_VAR_DEFAULT_INNER_TESS_LEVEL:
+         memcpy(ptr, ctx->default_inner_tess_factor, sizeof(ctx->default_inner_tess_factor));
+         size += 4;
+         break;
+      case D3D12_STATE_VAR_DEFAULT_OUTER_TESS_LEVEL:
+         memcpy(ptr, ctx->default_outer_tess_factor, sizeof(ctx->default_outer_tess_factor));
+         size += 4;
+         break;
+      case D3D12_STATE_VAR_PATCH_VERTICES_IN:
+         ptr[0] = ctx->patch_vertices;
+         size += 4;
+         break;
       default:
          unreachable("unknown state variable");
       }
@@ -586,7 +598,7 @@ validate_stream_output_targets(struct d3d12_context *ctx)
 }
 
 static D3D_PRIMITIVE_TOPOLOGY
-topology(enum pipe_prim_type prim_type)
+topology(enum pipe_prim_type prim_type, uint8_t patch_vertices)
 {
    switch (prim_type) {
    case PIPE_PRIM_POINTS:
@@ -616,10 +628,8 @@ topology(enum pipe_prim_type prim_type)
    case PIPE_PRIM_TRIANGLE_STRIP_ADJACENCY:
       return D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ;
 
-/*
    case PIPE_PRIM_PATCHES:
-      return D3D_PRIMITIVE_TOPOLOGY_PATCHLIST;
-*/
+      return (D3D_PRIMITIVE_TOPOLOGY)(D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + patch_vertices - 1);
 
    case PIPE_PRIM_QUADS:
    case PIPE_PRIM_QUAD_STRIP:
@@ -696,6 +706,7 @@ prim_supported(enum pipe_prim_type prim_type)
    case PIPE_PRIM_LINE_STRIP_ADJACENCY:
    case PIPE_PRIM_TRIANGLES_ADJACENCY:
    case PIPE_PRIM_TRIANGLE_STRIP_ADJACENCY:
+   case PIPE_PRIM_PATCHES:
       return true;
 
    default:
@@ -707,7 +718,9 @@ static inline struct d3d12_shader_selector *
 d3d12_last_vertex_stage(struct d3d12_context *ctx)
 {
    struct d3d12_shader_selector *sel = ctx->gfx_stages[PIPE_SHADER_GEOMETRY];
-   if (!sel || sel->is_gs_variant)
+   if (!sel || sel->is_variant)
+      sel = ctx->gfx_stages[PIPE_SHADER_TESS_EVAL];
+   if (!sel)
       sel = ctx->gfx_stages[PIPE_SHADER_VERTEX];
    return sel;
 }
@@ -1043,7 +1056,7 @@ d3d12_draw_vbo(struct pipe_context *pctx,
       ctx->cmdlist->OMSetStencilRef(ctx->stencil_ref.ref_value[0]);
 
    if (ctx->cmdlist_dirty & D3D12_DIRTY_PRIM_MODE)
-      ctx->cmdlist->IASetPrimitiveTopology(topology((enum pipe_prim_type)dinfo->mode));
+      ctx->cmdlist->IASetPrimitiveTopology(topology((enum pipe_prim_type)dinfo->mode, ctx->patch_vertices));
 
    for (unsigned i = 0; i < ctx->num_vbs; ++i) {
       if (ctx->vbs[i].buffer.resource) {

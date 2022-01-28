@@ -1691,9 +1691,7 @@ anv_device_alloc_bo(struct anv_device *device,
       uint32_t nregions = 0;
 
       if (alloc_flags & ANV_BO_ALLOC_LOCAL_MEM) {
-         /* For vram allocation, still use system memory as a fallback. */
          regions[nregions++] = device->physical->vram.region;
-         regions[nregions++] = device->physical->sys.region;
       } else {
          regions[nregions++] = device->physical->sys.region;
       }
@@ -1718,7 +1716,8 @@ anv_device_alloc_bo(struct anv_device *device,
       .is_external = (alloc_flags & ANV_BO_ALLOC_EXTERNAL),
       .has_client_visible_address =
          (alloc_flags & ANV_BO_ALLOC_CLIENT_VISIBLE_ADDRESS) != 0,
-      .has_implicit_ccs = ccs_size > 0,
+      .has_implicit_ccs = ccs_size > 0 || (device->info.verx10 >= 125 &&
+         (alloc_flags & ANV_BO_ALLOC_LOCAL_MEM)),
    };
 
    if (alloc_flags & ANV_BO_ALLOC_MAPPED) {
