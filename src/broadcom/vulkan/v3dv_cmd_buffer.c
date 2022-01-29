@@ -410,10 +410,13 @@ cmd_buffer_can_merge_subpass(struct v3dv_cmd_buffer *cmd_buffer,
    /* FIXME: Since some attachment formats can't be resolved using the TLB we
     * need to emit separate resolve jobs for them and that would not be
     * compatible with subpass merges. We could fix that by testing if any of
-    * the attachments to resolve doesn't suppotr TLB resolves.
+    * the attachments to resolve doesn't support TLB resolves.
     */
-   if (prev_subpass->resolve_attachments || subpass->resolve_attachments)
+   if (prev_subpass->resolve_attachments || subpass->resolve_attachments ||
+       prev_subpass->resolve_depth || prev_subpass->resolve_stencil ||
+       subpass->resolve_depth || subpass->resolve_stencil) {
       return false;
+   }
 
    return true;
 }
@@ -967,13 +970,17 @@ cmd_buffer_subpass_handle_pending_resolves(struct v3dv_cmd_buffer *cmd_buffer)
       if (src_attachment_idx == VK_ATTACHMENT_UNUSED)
          continue;
 
-      if (pass->attachments[src_attachment_idx].use_tlb_resolve)
+      /* Skip if this attachment doesn't have a resolve or if it was already
+       * implemented as a TLB resolve.
+       */
+      if (!cmd_buffer->state.attachments[src_attachment_idx].has_resolve ||
+          cmd_buffer->state.attachments[src_attachment_idx].use_tlb_resolve) {
          continue;
+      }
 
       const uint32_t dst_attachment_idx =
          subpass->resolve_attachments[i].attachment;
-      if (dst_attachment_idx == VK_ATTACHMENT_UNUSED)
-         continue;
+      assert(dst_attachment_idx != VK_ATTACHMENT_UNUSED);
 
       struct v3dv_image_view *src_iview =
          cmd_buffer->state.attachments[src_attachment_idx].image_view;
@@ -1156,6 +1163,48 @@ cmd_buffer_update_tile_alignment(struct v3dv_cmd_buffer *cmd_buffer)
       perf_debug("Render area for subpass %d of render pass %p doesn't "
                  "match render pass granularity.\n",
                  cmd_buffer->state.subpass_idx, cmd_buffer->state.pass);
+   }
+}
+
+static void
+cmd_buffer_update_attachment_resolve_state(struct v3dv_cmd_buffer *cmd_buffer)
+{
+   /* NOTE: This should be called after cmd_buffer_update_tile_alignment()
+    * since it relies on up-to-date information about subpass tile alignment.
+    */
+   const struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+   const struct v3dv_render_pass *pass = state->pass;
+   const struct v3dv_subpass *subpass = &pass->subpasses[state->subpass_idx];
+
+   for (uint32_t i = 0; i < subpass->color_count; i++) {
+      const uint32_t attachment_idx = subpass->color_attachments[i].attachment;
+      if (attachment_idx == VK_ATTACHMENT_UNUSED)
+         continue;
+
+      state->attachments[attachment_idx].has_resolve =
+         subpass->resolve_attachments &&
+         subpass->resolve_attachments[i].attachment != VK_ATTACHMENT_UNUSED;
+
+      state->attachments[attachment_idx].use_tlb_resolve =
+         state->attachments[attachment_idx].has_resolve &&
+         state->tile_aligned_render_area &&
+         pass->attachments[attachment_idx].try_tlb_resolve;
+   }
+
+   uint32_t ds_attachment_idx = subpass->ds_attachment.attachment;
+   if (ds_attachment_idx != VK_ATTACHMENT_UNUSED) {
+      uint32_t ds_resolve_attachment_idx =
+         subpass->ds_resolve_attachment.attachment;
+      state->attachments[ds_attachment_idx].has_resolve =
+         ds_resolve_attachment_idx != VK_ATTACHMENT_UNUSED;
+
+      assert(!state->attachments[ds_attachment_idx].has_resolve ||
+             (subpass->resolve_depth || subpass->resolve_stencil));
+
+      state->attachments[ds_attachment_idx].use_tlb_resolve =
+         state->attachments[ds_attachment_idx].has_resolve &&
+         state->tile_aligned_render_area &&
+         pass->attachments[ds_attachment_idx].try_tlb_resolve;
    }
 }
 
@@ -1552,6 +1601,8 @@ v3dv_cmd_buffer_subpass_start(struct v3dv_cmd_buffer *cmd_buffer,
     * and with that the tile size selected by the hardware can change too.
     */
    cmd_buffer_update_tile_alignment(cmd_buffer);
+
+   cmd_buffer_update_attachment_resolve_state(cmd_buffer);
 
    /* If we can't use TLB clears then we need to emit draw clears for any
     * LOAD_OP_CLEAR attachments in this subpass now. We might also need to emit

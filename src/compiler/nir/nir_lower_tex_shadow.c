@@ -21,13 +21,13 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "d3d12_nir_lower_texcmp.h"
+#include "nir.h"
 #include "nir_builder.h"
 #include "nir_builtin_builder.h"
 
 static bool
-lower_sample_tex_compare_filter(const nir_instr *instr,
-                                UNUSED const void *_options)
+nir_lower_tex_shadow_filter(const nir_instr *instr,
+                            UNUSED const void *_options)
 {
    if (instr->type != nir_instr_type_tex)
       return false;
@@ -69,12 +69,11 @@ strip_shadow_with_array(const struct glsl_type *type)
 typedef struct {
    unsigned n_states;
    enum compare_func *compare_func;
-   dxil_texture_swizzle_state *tex_swizzles;
+   nir_lower_tex_shadow_swizzle *tex_swizzles;
 } sampler_state;
 
 static nir_ssa_def *
-lower_sample_tex_compare_impl(nir_builder *b, nir_instr *instr,
-                              void *options)
+nir_lower_tex_shadow_impl(nir_builder *b, nir_instr *instr, void *options)
 
 {
    nir_tex_instr *tex = nir_instr_as_tex(instr);
@@ -86,15 +85,17 @@ lower_sample_tex_compare_impl(nir_builder *b, nir_instr *instr,
    tex->is_shadow = false;
 
    int comp_index = nir_tex_instr_src_index(tex, nir_tex_src_comparator);
+   unsigned sampler_binding = tex->texture_index;
 
    nir_deref_instr *sampler_deref = NULL;
    nir_variable *sampler = NULL;
 
    int sampler_index = nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
-   assert(sampler_index >= 0);
-
-   sampler_deref = nir_instr_as_deref(tex->src[sampler_index].src.ssa->parent_instr);
-   sampler = nir_deref_instr_get_variable(sampler_deref);
+   if (sampler_index >= 0) {
+      sampler_deref = nir_instr_as_deref(tex->src[sampler_index].src.ssa->parent_instr);
+      sampler = nir_deref_instr_get_variable(sampler_deref);
+      sampler_binding = sampler ? sampler->data.binding : 0;
+   }
 
    /* NIR expects a vec4 result from the above texture instructions */
    nir_ssa_dest_init(&tex->instr, &tex->dest, 4, 32, NULL);
@@ -108,8 +109,8 @@ lower_sample_tex_compare_impl(nir_builder *b, nir_instr *instr,
 
    nir_ssa_def * result =
          nir_compare_func(b,
-                          sampler->data.binding < state->n_states ?
-                             state->compare_func[sampler->data.binding] : COMPARE_FUNC_ALWAYS,
+                          sampler_binding < state->n_states ?
+                             state->compare_func[sampler_binding] : COMPARE_FUNC_ALWAYS,
                           cmp, tex_r);
 
    result = nir_b2f32(b, result);
@@ -117,16 +118,18 @@ lower_sample_tex_compare_impl(nir_builder *b, nir_instr *instr,
    nir_ssa_def *zero = nir_imm_float(b, 0.0);
 
    nir_ssa_def *lookup[6] = {result, NULL, NULL, NULL, zero, one};
-   nir_ssa_def *r[4] = {lookup[state->tex_swizzles[sampler->data.binding].swizzle_r],
-                        lookup[state->tex_swizzles[sampler->data.binding].swizzle_g],
-                        lookup[state->tex_swizzles[sampler->data.binding].swizzle_b],
-                        lookup[state->tex_swizzles[sampler->data.binding].swizzle_a]
+   nir_ssa_def *r[4] = {lookup[state->tex_swizzles[sampler_binding].swizzle_r],
+                        lookup[state->tex_swizzles[sampler_binding].swizzle_g],
+                        lookup[state->tex_swizzles[sampler_binding].swizzle_b],
+                        lookup[state->tex_swizzles[sampler_binding].swizzle_a]
                        };
 
    result = nir_vec(b, r, num_components);
 
-   sampler->type = strip_shadow_with_array(sampler->type);
-   sampler_deref->type = sampler->type;
+   if (sampler_index >= 0) {
+      sampler->type = strip_shadow_with_array(sampler->type);
+      sampler_deref->type = sampler->type;
+   }
 
    tex->is_shadow = false;
    nir_tex_instr_remove_src(tex, comp_index);
@@ -135,17 +138,17 @@ lower_sample_tex_compare_impl(nir_builder *b, nir_instr *instr,
 }
 
 bool
-d3d12_lower_sample_tex_compare(nir_shader *s,
-                               unsigned n_states,
-                               enum compare_func *compare_func,
-                               dxil_texture_swizzle_state *tex_swizzles)
+nir_lower_tex_shadow(nir_shader *s,
+                     unsigned n_states,
+                     enum compare_func *compare_func,
+                     nir_lower_tex_shadow_swizzle *tex_swizzles)
 {
    sampler_state state = {n_states, compare_func, tex_swizzles};
 
    bool result =
          nir_shader_lower_instructions(s,
-                                       lower_sample_tex_compare_filter,
-                                       lower_sample_tex_compare_impl,
+                                       nir_lower_tex_shadow_filter,
+                                       nir_lower_tex_shadow_impl,
                                        &state);
    return result;
 }

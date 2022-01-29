@@ -648,7 +648,10 @@ create_bvci(struct zink_context *ctx, struct zink_resource *res, enum pipe_forma
    memset(&bvci, 0, sizeof(bvci));
    bvci.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
    bvci.pNext = NULL;
-   bvci.buffer = res->obj->buffer;
+   if (screen->format_props[format].bufferFeatures & VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT)
+      bvci.buffer = res->obj->storage_buffer ? res->obj->storage_buffer : res->obj->buffer;
+   else
+      bvci.buffer = res->obj->buffer;
    bvci.format = zink_get_format(screen, format);
    assert(bvci.format);
    bvci.offset = offset;
@@ -961,7 +964,7 @@ zink_set_vertex_buffers(struct pipe_context *pctx,
             zink_resource_buffer_barrier(ctx, res, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
                                          VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
          } else {
-            enabled_buffers &= ~BITFIELD_BIT(i);
+            enabled_buffers &= ~BITFIELD_BIT(start_slot + i);
          }
       }
    } else {
@@ -2187,11 +2190,13 @@ begin_render_pass(struct zink_context *ctx)
          if (ctx->fb_state.cbufs[i]) {
             struct zink_surface *surf = zink_csurface(ctx->fb_state.cbufs[i]);
             struct zink_surface *transient = zink_transient_surface(ctx->fb_state.cbufs[i]);
-            if (transient) {
-               assert(zink_resource(transient->base.texture)->obj->vkusage == ctx->framebuffer->state.infos[i].usage);
-               assert(zink_resource(surf->base.texture)->obj->vkusage == ctx->framebuffer->state.infos[cresolve_offset].usage);
-            } else {
-               assert(zink_resource(surf->base.texture)->obj->vkusage == ctx->framebuffer->state.infos[i].usage);
+            if (surf->base.format == ctx->fb_state.cbufs[i]->format) {
+               if (transient) {
+                  assert(zink_resource(transient->base.texture)->obj->vkusage == ctx->framebuffer->state.infos[i].usage);
+                  assert(zink_resource(surf->base.texture)->obj->vkusage == ctx->framebuffer->state.infos[cresolve_offset].usage);
+               } else {
+                  assert(zink_resource(surf->base.texture)->obj->vkusage == ctx->framebuffer->state.infos[i].usage);
+               }
             }
          }
       }

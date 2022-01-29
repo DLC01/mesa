@@ -93,14 +93,12 @@ void
 zink_destroy_resource_object(struct zink_screen *screen, struct zink_resource_object *obj)
 {
    if (obj->is_buffer) {
-      util_dynarray_foreach(&obj->tmp, VkBuffer, buffer)
-         VKSCR(DestroyBuffer)(screen->dev, *buffer, NULL);
       VKSCR(DestroyBuffer)(screen->dev, obj->buffer, NULL);
+      VKSCR(DestroyBuffer)(screen->dev, obj->storage_buffer, NULL);
    } else {
       VKSCR(DestroyImage)(screen->dev, obj->image, NULL);
    }
 
-   util_dynarray_fini(&obj->tmp);
    zink_descriptor_set_refs_clear(&obj->desc_set_refs, obj);
    zink_bo_unref(screen, obj->bo);
    FREE(obj);
@@ -253,7 +251,8 @@ get_image_usage_for_feats(struct zink_screen *screen, VkFormatFeatureFlags feats
          usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
          if ((bind & (PIPE_BIND_LINEAR | PIPE_BIND_SHARED)) != (PIPE_BIND_LINEAR | PIPE_BIND_SHARED))
             usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
-      } else if (!(bind & ZINK_BIND_VIDEO))
+      } else if (templ->nr_samples)
+         /* this can't be populated, so we can't do it */
          return 0;
    }
 
@@ -505,7 +504,6 @@ resource_object_create(struct zink_screen *screen, const struct pipe_resource *t
    bool scanout = templ->bind & PIPE_BIND_SCANOUT;
 
    pipe_reference_init(&obj->reference, 1);
-   util_dynarray_init(&obj->tmp, NULL);
    util_dynarray_init(&obj->desc_set_refs.refs, NULL);
    if (templ->target == PIPE_BUFFER) {
       VkBufferCreateInfo bci = create_bci(screen, templ, templ->bind);
@@ -513,6 +511,14 @@ resource_object_create(struct zink_screen *screen, const struct pipe_resource *t
       if (VKSCR(CreateBuffer)(screen->dev, &bci, NULL, &obj->buffer) != VK_SUCCESS) {
          debug_printf("vkCreateBuffer failed\n");
          goto fail1;
+      }
+
+      if (!(templ->bind & PIPE_BIND_SHADER_IMAGE)) {
+         bci.usage |= VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
+         if (VKSCR(CreateBuffer)(screen->dev, &bci, NULL, &obj->storage_buffer) != VK_SUCCESS) {
+            debug_printf("vkCreateBuffer failed\n");
+            goto fail2;
+         }
       }
 
       VKSCR(GetBufferMemoryRequirements)(screen->dev, obj->buffer, &reqs);
@@ -824,9 +830,12 @@ resource_object_create(struct zink_screen *screen, const struct pipe_resource *t
    }
 
    if (templ->target == PIPE_BUFFER) {
-      if (!(templ->flags & PIPE_RESOURCE_FLAG_SPARSE))
+      if (!(templ->flags & PIPE_RESOURCE_FLAG_SPARSE)) {
          if (VKSCR(BindBufferMemory)(screen->dev, obj->buffer, zink_bo_get_mem(obj->bo), obj->offset) != VK_SUCCESS)
             goto fail3;
+         if (obj->storage_buffer && VKSCR(BindBufferMemory)(screen->dev, obj->storage_buffer, zink_bo_get_mem(obj->bo), obj->offset) != VK_SUCCESS)
+            goto fail3;
+      }
    } else {
       if (num_planes > 1) {
          VkBindImageMemoryInfo infos[3];
@@ -857,9 +866,10 @@ fail3:
    zink_bo_unref(screen, obj->bo);
 
 fail2:
-   if (templ->target == PIPE_BUFFER)
+   if (templ->target == PIPE_BUFFER) {
       VKSCR(DestroyBuffer)(screen->dev, obj->buffer, NULL);
-   else
+      VKSCR(DestroyBuffer)(screen->dev, obj->storage_buffer, NULL);
+   } else
       VKSCR(DestroyImage)(screen->dev, obj->image, NULL);
 fail1:
    FREE(obj);
@@ -913,10 +923,9 @@ resource_create(struct pipe_screen *pscreen,
    }
 
    res->internal_format = templ->format;
-   if (templ->flags & PIPE_RESOURCE_FLAG_SPARSE)
-      res->base.b.bind |= PIPE_BIND_SHADER_IMAGE;
    if (templ->target == PIPE_BUFFER) {
       util_range_init(&res->valid_buffer_range);
+      res->base.b.bind |= PIPE_BIND_SHADER_IMAGE;
       if (!screen->resizable_bar && templ->width0 >= 8196) {
          /* We don't want to evict buffers from VRAM by mapping them for CPU access,
           * because they might never be moved back again. If a buffer is large enough,
@@ -928,6 +937,8 @@ resource_create(struct pipe_screen *pscreen,
          res->base.b.flags |= PIPE_RESOURCE_FLAG_DONT_MAP_DIRECTLY;
       }
    } else {
+      if (templ->flags & PIPE_RESOURCE_FLAG_SPARSE)
+         res->base.b.bind |= PIPE_BIND_SHADER_IMAGE;
       if (templ->flags & PIPE_RESOURCE_FLAG_SPARSE) {
          uint32_t count = 1;
          VKSCR(GetImageSparseMemoryRequirements)(screen->dev, res->obj->image, &count, &res->sparse);
@@ -1773,28 +1784,6 @@ zink_resource_get_separate_stencil(struct pipe_resource *pres)
 
 }
 
-VkBuffer
-zink_resource_tmp_buffer(struct zink_screen *screen, struct zink_resource *res, unsigned offset_add, unsigned add_binds, unsigned *offset_out)
-{
-   VkBufferCreateInfo bci = create_bci(screen, &res->base.b, res->base.b.bind | add_binds);
-   VkDeviceSize size = bci.size - offset_add;
-   VkDeviceSize offset = offset_add;
-   if (offset_add) {
-      assert(bci.size > offset_add);
-
-      align_offset_size(res->obj->alignment, &offset, &size, bci.size);
-   }
-   bci.size = size;
-
-   VkBuffer buffer;
-   if (VKSCR(CreateBuffer)(screen->dev, &bci, NULL, &buffer) != VK_SUCCESS)
-      return VK_NULL_HANDLE;
-   VKSCR(BindBufferMemory)(screen->dev, buffer, zink_bo_get_mem(res->obj->bo), res->obj->offset + offset);
-   if (offset_out)
-      *offset_out = offset_add - offset;
-   return buffer;
-}
-
 bool
 zink_resource_object_init_storage(struct zink_context *ctx, struct zink_resource *res)
 {
@@ -1803,15 +1792,7 @@ zink_resource_object_init_storage(struct zink_context *ctx, struct zink_resource
    if (res->base.b.bind & PIPE_BIND_SHADER_IMAGE)
       return true;
    if (res->obj->is_buffer) {
-      if (res->base.b.bind & PIPE_BIND_SHADER_IMAGE)
-         return true;
-
-      VkBuffer buffer = zink_resource_tmp_buffer(screen, res, 0, PIPE_BIND_SHADER_IMAGE, NULL);
-      if (!buffer)
-         return false;
-      util_dynarray_append(&res->obj->tmp, VkBuffer, res->obj->buffer);
-      res->obj->buffer = buffer;
-      res->base.b.bind |= PIPE_BIND_SHADER_IMAGE;
+      unreachable("zink: all buffers should have this bit");
    } else {
       zink_fb_clears_apply_region(ctx, &res->base.b, (struct u_rect){0, res->base.b.width0, 0, res->base.b.height0});
       zink_resource_image_barrier(ctx, res, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 0);

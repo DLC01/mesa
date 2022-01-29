@@ -501,6 +501,31 @@ cmd_buffer_render_pass_emit_stores(struct v3dv_cmd_buffer *cmd_buffer,
                            ds_last_subpass,
                            ds_attachment->desc.stencilStoreOp);
 
+      /* If we have a resolve, handle it before storing the tile */
+      const struct v3dv_cmd_buffer_attachment_state *ds_att_state =
+         &state->attachments[ds_attachment_idx];
+      if (ds_att_state->use_tlb_resolve) {
+         assert(ds_att_state->has_resolve);
+         assert(subpass->resolve_depth || subpass->resolve_stencil);
+         const uint32_t resolve_attachment_idx =
+            subpass->ds_resolve_attachment.attachment;
+         assert(resolve_attachment_idx != VK_ATTACHMENT_UNUSED);
+
+         const uint32_t zs_buffer =
+            v3dv_zs_buffer(subpass->resolve_depth, subpass->resolve_stencil);
+         cmd_buffer_render_pass_emit_store(cmd_buffer, cl,
+                                           resolve_attachment_idx, layer,
+                                           zs_buffer,
+                                           false, false);
+         has_stores = true;
+      } else if (ds_att_state->has_resolve) {
+         /* If we can't use the TLB to implement the resolve we will need to
+          * store the attachment so we can implement it later using a blit.
+          */
+         needs_depth_store = subpass->resolve_depth;
+         needs_stencil_store = subpass->resolve_stencil;
+      }
+
       /* GFXH-1689: The per-buffer store command's clear buffer bit is broken
        * for depth/stencil.
        *
@@ -577,15 +602,16 @@ cmd_buffer_render_pass_emit_stores(struct v3dv_cmd_buffer *cmd_buffer,
        * color attachment store below, since the clear happens after the
        * store is completed.
        *
-       * If the attachment doesn't support TLB resolves then we will have to
-       * fallback to doing the resolve in a shader separately after this
-       * job, so we will need to store the multisampled sttachment even if that
-       * wansn't requested by the client.
+       * If the attachment doesn't support TLB resolves (or the render area
+       * is not aligned to tile boundaries) then we will have to fallback to
+       * doing the resolve in a shader separately after this job, so we will
+       * need to store the multisampled attachment even if that wasn't
+       * requested by the client.
        */
-      const bool needs_resolve =
-         subpass->resolve_attachments &&
-         subpass->resolve_attachments[i].attachment != VK_ATTACHMENT_UNUSED;
-      if (needs_resolve && attachment->use_tlb_resolve) {
+      const struct v3dv_cmd_buffer_attachment_state *att_state =
+         &state->attachments[attachment_idx];
+      if (att_state->use_tlb_resolve) {
+         assert(att_state->has_resolve);
          const uint32_t resolve_attachment_idx =
             subpass->resolve_attachments[i].attachment;
          cmd_buffer_render_pass_emit_store(cmd_buffer, cl,
@@ -593,7 +619,7 @@ cmd_buffer_render_pass_emit_stores(struct v3dv_cmd_buffer *cmd_buffer,
                                            RENDER_TARGET_0 + i,
                                            false, true);
          has_stores = true;
-      } else if (needs_resolve) {
+      } else if (att_state->has_resolve) {
          needs_store = true;
       }
 
@@ -837,7 +863,8 @@ v3dX(cmd_buffer_emit_render_pass_rcl)(struct v3dv_cmd_buffer *cmd_buffer)
             check_needs_store(state,
                               ds_aspects & VK_IMAGE_ASPECT_DEPTH_BIT,
                               ds_attachment->last_subpass,
-                              ds_attachment->desc.storeOp);
+                              ds_attachment->desc.storeOp) ||
+                              subpass->resolve_depth;
 
          do_early_zs_clear = needs_depth_clear && !needs_depth_store;
          if (do_early_zs_clear &&
@@ -852,7 +879,8 @@ v3dX(cmd_buffer_emit_render_pass_rcl)(struct v3dv_cmd_buffer *cmd_buffer)
                check_needs_store(state,
                                  ds_aspects & VK_IMAGE_ASPECT_STENCIL_BIT,
                                  ds_attachment->last_subpass,
-                                 ds_attachment->desc.stencilStoreOp);
+                                 ds_attachment->desc.stencilStoreOp) ||
+                                 subpass->resolve_stencil;
 
             do_early_zs_clear = !needs_stencil_load && !needs_stencil_store;
          }

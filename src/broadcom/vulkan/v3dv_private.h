@@ -697,6 +697,8 @@ struct v3dv_subpass {
    struct v3dv_subpass_attachment *resolve_attachments;
 
    struct v3dv_subpass_attachment ds_attachment;
+   struct v3dv_subpass_attachment ds_resolve_attachment;
+   bool resolve_depth, resolve_stencil;
 
    /* If we need to emit the clear of the depth/stencil attachment using a
     * a draw call instead of using the TLB (GFXH-1461).
@@ -725,10 +727,11 @@ struct v3dv_render_pass_attachment {
       uint32_t last_subpass;
    } views[MAX_MULTIVIEW_VIEW_COUNT];
 
-   /* If this is a multismapled attachment that is going to be resolved,
-    * whether we can use the TLB resolve on store.
+   /* If this is a multisampled attachment that is going to be resolved,
+    * whether we may be able to use the TLB hardware resolve based on the
+    * attachment format.
     */
-   bool use_tlb_resolve;
+   bool try_tlb_resolve;
 };
 
 struct v3dv_render_pass {
@@ -845,6 +848,14 @@ struct v3dv_cmd_buffer_attachment_state {
     * framebuffer is used, from VkRenderPassAttachmentBeginInfo.
     */
    struct v3dv_image_view *image_view;
+
+   /* If this is a multisampled attachment with a resolve operation. */
+   bool has_resolve;
+
+   /* If this is a multisampled attachment with a resolve operation,
+    * whether we can use the TLB for the resolve.
+    */
+   bool use_tlb_resolve;
 };
 
 struct v3dv_viewport_state {
