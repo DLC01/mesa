@@ -43,6 +43,7 @@ enum dxil_prog_sig_comp_type dxil_get_prog_sig_comp_type(const struct glsl_type 
    case GLSL_TYPE_UINT64: return DXIL_PROG_SIG_COMP_TYPE_UINT64;
    case GLSL_TYPE_INT64: return DXIL_PROG_SIG_COMP_TYPE_SINT64;
    case GLSL_TYPE_BOOL: return DXIL_PROG_SIG_COMP_TYPE_UINT32;
+   case GLSL_TYPE_STRUCT: return DXIL_PROG_SIG_COMP_TYPE_UINT32;
    default:
       debug_printf("unexpected type: %s\n", glsl_get_type_name(type));
       return DXIL_PROG_SIG_COMP_TYPE_UNKNOWN;
@@ -89,6 +90,7 @@ enum dxil_resource_kind dxil_get_resource_kind(const struct glsl_type *type)
                             : DXIL_RESOURCE_KIND_TEXTURE1D;
          case GLSL_SAMPLER_DIM_2D:
          case GLSL_SAMPLER_DIM_EXTERNAL:
+         case GLSL_SAMPLER_DIM_SUBPASS:
             return is_array ? DXIL_RESOURCE_KIND_TEXTURE2D_ARRAY
                             : DXIL_RESOURCE_KIND_TEXTURE2D;
          case GLSL_SAMPLER_DIM_3D:
@@ -101,6 +103,7 @@ enum dxil_resource_kind dxil_get_resource_kind(const struct glsl_type *type)
          case GLSL_SAMPLER_DIM_BUF:
             return DXIL_RESOURCE_KIND_TYPED_BUFFER;
          case GLSL_SAMPLER_DIM_MS:
+         case GLSL_SAMPLER_DIM_SUBPASS_MS:
             return is_array ? DXIL_RESOURCE_KIND_TEXTURE2DMS_ARRAY
                             : DXIL_RESOURCE_KIND_TEXTURE2DMS;
 

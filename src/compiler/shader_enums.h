@@ -73,6 +73,13 @@ gl_shader_stage_is_compute(gl_shader_stage stage)
 }
 
 static inline bool
+gl_shader_stage_is_mesh(gl_shader_stage stage)
+{
+   return stage == MESA_SHADER_TASK ||
+          stage == MESA_SHADER_MESH;
+}
+
+static inline bool
 gl_shader_stage_uses_workgroup(gl_shader_stage stage)
 {
    return stage == MESA_SHADER_COMPUTE ||
@@ -89,6 +96,19 @@ gl_shader_stage_is_callable(gl_shader_stage stage)
           stage == MESA_SHADER_MISS ||
           stage == MESA_SHADER_INTERSECTION ||
           stage == MESA_SHADER_CALLABLE;
+}
+
+static inline bool
+gl_shader_stage_can_set_fragment_shading_rate(gl_shader_stage stage)
+{
+   /* According to EXT_fragment_shading_rate :
+    *
+    *    "This extension adds support for setting the fragment shading rate
+    *     for a primitive in vertex, geometry, and mesh shading stages"
+    */
+   return stage == MESA_SHADER_VERTEX ||
+          stage == MESA_SHADER_GEOMETRY ||
+          stage == MESA_SHADER_MESH;
 }
 
 /**
@@ -477,6 +497,7 @@ _mesa_varying_slot_in_fs(gl_varying_slot slot)
 #define VARYING_BIT_LAYER BITFIELD64_BIT(VARYING_SLOT_LAYER)
 #define VARYING_BIT_VIEWPORT BITFIELD64_BIT(VARYING_SLOT_VIEWPORT)
 #define VARYING_BIT_FACE BITFIELD64_BIT(VARYING_SLOT_FACE)
+#define VARYING_BIT_PRIMITIVE_SHADING_RATE BITFIELD64_BIT(VARYING_SLOT_PRIMITIVE_SHADING_RATE)
 #define VARYING_BIT_PNTC BITFIELD64_BIT(VARYING_SLOT_PNTC)
 #define VARYING_BIT_TESS_LEVEL_OUTER BITFIELD64_BIT(VARYING_SLOT_TESS_LEVEL_OUTER)
 #define VARYING_BIT_TESS_LEVEL_INNER BITFIELD64_BIT(VARYING_SLOT_TESS_LEVEL_INNER)

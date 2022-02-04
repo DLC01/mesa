@@ -123,7 +123,7 @@ blit_resolve(struct d3d12_context *ctx, const struct pipe_blit_info *info)
                                    D3D12_RESOURCE_STATE_RESOLVE_DEST,
                                    D3D12_BIND_INVALIDATE_FULL);
 
-   d3d12_apply_resource_states(ctx);
+   d3d12_apply_resource_states(ctx, false);
 
    d3d12_batch_reference_resource(batch, src, false);
    d3d12_batch_reference_resource(batch, dst, true);
@@ -432,7 +432,7 @@ d3d12_direct_copy(struct d3d12_context *ctx,
                                        D3D12_RESOURCE_STATE_COPY_DEST,
                                        D3D12_BIND_INVALIDATE_FULL);
 
-   d3d12_apply_resource_states(ctx);
+   d3d12_apply_resource_states(ctx, false);
 
    d3d12_batch_reference_resource(batch, src, false);
    d3d12_batch_reference_resource(batch, dst, true);
@@ -620,7 +620,7 @@ get_stencil_resolve_vs(struct d3d12_context *ctx)
       return ctx->stencil_resolve_vs;
 
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX,
-                                                  dxil_get_nir_compiler_options(),
+                                                  &d3d12_screen(ctx->base.screen)->nir_options,
                                                   "linear_blit_vs");
 
    const struct glsl_type *vec4 = glsl_vec4_type();
@@ -651,7 +651,7 @@ get_stencil_resolve_fs(struct d3d12_context *ctx, bool no_flip)
       return ctx->stencil_resolve_fs_no_flip;
 
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
-                                                  dxil_get_nir_compiler_options(),
+                                                  &d3d12_screen(ctx->base.screen)->nir_options,
                                                   no_flip ? "stencil_resolve_fs_no_flip" : "stencil_resolve_fs");
 
    nir_variable *stencil_out = nir_variable_create(b.shader,
@@ -826,7 +826,7 @@ blit_resolve_stencil(struct d3d12_context *ctx,
                                        0, 1, 0, 1, 1, 1,
                                        D3D12_RESOURCE_STATE_COPY_DEST,
                                        D3D12_BIND_INVALIDATE_FULL);
-   d3d12_apply_resource_states(ctx);
+   d3d12_apply_resource_states(ctx, false);
 
    struct d3d12_batch *batch = d3d12_current_batch(ctx);
    d3d12_batch_reference_resource(batch, d3d12_resource(tmp), false);

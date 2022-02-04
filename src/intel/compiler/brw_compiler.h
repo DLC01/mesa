@@ -138,9 +138,9 @@ brw_shader_stage_is_bindless(gl_shader_stage stage)
 }
 
 static inline bool
-brw_shader_stage_is_mesh(gl_shader_stage stage)
+brw_shader_stage_requires_bindless_resources(gl_shader_stage stage)
 {
-   return stage == MESA_SHADER_TASK || stage == MESA_SHADER_MESH;
+   return brw_shader_stage_is_bindless(stage) || gl_shader_stage_is_mesh(stage);
 }
 
 /**
@@ -1987,7 +1987,7 @@ static inline int
 brw_compute_first_urb_slot_required(uint64_t inputs_read,
                                     const struct brw_vue_map *prev_stage_vue_map)
 {
-   if ((inputs_read & (VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT)) == 0) {
+   if ((inputs_read & (VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT | VARYING_BIT_PRIMITIVE_SHADING_RATE)) == 0) {
       for (int i = 0; i < prev_stage_vue_map->num_slots; i++) {
          int varying = prev_stage_vue_map->slot_to_varying[i];
          if (varying > 0 && (inputs_read & BITFIELD64_BIT(varying)) != 0)

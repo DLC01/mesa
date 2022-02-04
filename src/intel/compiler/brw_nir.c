@@ -861,7 +861,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
       .ballot_components = 1,
       .lower_to_scalar = true,
       .lower_vote_trivial = !is_scalar,
-      .lower_shuffle = true,
+      .lower_relative_shuffle = true,
       .lower_quad_broadcast_dynamic = true,
       .lower_elect = true,
    };
@@ -1109,6 +1109,9 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
       };
       OPT(nir_lower_idiv, &options);
    }
+
+   if (gl_shader_stage_can_set_fragment_shading_rate(nir->info.stage))
+      brw_nir_lower_shading_rate_output(nir);
 
    brw_nir_optimize(nir, compiler, is_scalar, false);
 

@@ -1194,6 +1194,16 @@ struct anv_device {
 
     struct anv_state                            slice_hash;
 
+    /** An array of CPS_STATE structures grouped by MAX_VIEWPORTS elements
+     *
+     * We need to emit CPS_STATE structures for each viewport accessible by a
+     * pipeline. So rather than write many identical CPS_STATE structures
+     * dynamically, we can enumerate all possible combinaisons and then just
+     * emit a 3DSTATE_CPS_POINTERS instruction with the right offset into this
+     * array.
+     */
+    struct anv_state                            cps_states;
+
     uint32_t                                    queue_count;
     struct anv_queue  *                         queues;
 
@@ -2696,7 +2706,10 @@ struct anv_dynamic_state {
       VkSampleLocationEXT                       locations[MAX_SAMPLE_LOCATIONS];
    } sample_locations;
 
-   VkExtent2D                                   fragment_shading_rate;
+   struct {
+      VkExtent2D                                rate;
+      VkFragmentShadingRateCombinerOpKHR        ops[2];
+   } fragment_shading_rate;
 
    VkCullModeFlags                              cull_mode;
    VkFrontFace                                  front_face;
@@ -2951,6 +2964,9 @@ struct anv_subpass {
    VkResolveModeFlagBitsKHR                     depth_resolve_mode;
    VkResolveModeFlagBitsKHR                     stencil_resolve_mode;
 
+   struct anv_subpass_attachment *              fsr_attachment;
+   VkExtent2D                                   fsr_extent;
+
    uint32_t                                     view_mask;
 
    /** Subpass has a depth/stencil self-dependency */
@@ -2994,8 +3010,9 @@ struct anv_render_pass {
 
 /* RTs * 2 (for resolve attachments)
  * depth/sencil * 2
+ * fragment shading rate * 1
  */
-#define MAX_DYN_RENDER_ATTACHMENTS (MAX_RTS * 2 + 2 * 2)
+#define MAX_DYN_RENDER_ATTACHMENTS (MAX_RTS * 2 + 2 * 2 + 1)
 
 /* And this, kids, is what we call a nasty hack. */
 struct anv_dynamic_render_pass {
@@ -3035,9 +3052,9 @@ struct anv_cmd_state {
    struct anv_state                             binding_tables[MESA_VULKAN_SHADER_STAGES];
    struct anv_state                             samplers[MESA_VULKAN_SHADER_STAGES];
 
-   unsigned char                                sampler_sha1s[MESA_SHADER_STAGES][20];
-   unsigned char                                surface_sha1s[MESA_SHADER_STAGES][20];
-   unsigned char                                push_sha1s[MESA_SHADER_STAGES][20];
+   unsigned char                                sampler_sha1s[MESA_VULKAN_SHADER_STAGES][20];
+   unsigned char                                surface_sha1s[MESA_VULKAN_SHADER_STAGES][20];
+   unsigned char                                push_sha1s[MESA_VULKAN_SHADER_STAGES][20];
 
    /**
     * Whether or not the gfx8 PMA fix is enabled.  We ensure that, at the top
@@ -3272,7 +3289,13 @@ struct anv_state
 anv_cmd_buffer_cs_push_constants(struct anv_cmd_buffer *cmd_buffer);
 
 const struct anv_image_view *
+anv_cmd_buffer_get_first_color_view(const struct anv_cmd_buffer *cmd_buffer);
+
+const struct anv_image_view *
 anv_cmd_buffer_get_depth_stencil_view(const struct anv_cmd_buffer *cmd_buffer);
+
+const struct anv_image_view *
+anv_cmd_buffer_get_fsr_view(const struct anv_cmd_buffer *cmd_buffer);
 
 VkResult
 anv_cmd_buffer_alloc_blorp_binding_table(struct anv_cmd_buffer *cmd_buffer,
@@ -3499,8 +3522,6 @@ struct anv_graphics_pipeline {
 
    struct anv_state                             blend_state;
 
-   struct anv_state                             cps_state;
-
    uint32_t                                     vb_used;
    struct anv_pipeline_vertex_binding {
       uint32_t                                  stride;
@@ -3596,6 +3617,12 @@ anv_pipeline_is_primitive(const struct anv_graphics_pipeline *pipeline)
    return anv_pipeline_has_stage(pipeline, MESA_SHADER_VERTEX);
 }
 
+static inline bool
+anv_pipeline_is_mesh(const struct anv_graphics_pipeline *pipeline)
+{
+   return anv_pipeline_has_stage(pipeline, MESA_SHADER_MESH);
+}
+
 #define ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(prefix, stage)             \
 static inline const struct brw_##prefix##_prog_data *                   \
 get_##prefix##_prog_data(const struct anv_graphics_pipeline *pipeline)  \
@@ -3613,6 +3640,8 @@ ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(tcs, MESA_SHADER_TESS_CTRL)
 ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(tes, MESA_SHADER_TESS_EVAL)
 ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(gs, MESA_SHADER_GEOMETRY)
 ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(wm, MESA_SHADER_FRAGMENT)
+ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(mesh, MESA_SHADER_MESH)
+ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(task, MESA_SHADER_TASK)
 
 static inline const struct brw_cs_prog_data *
 get_cs_prog_data(const struct anv_compute_pipeline *pipeline)
@@ -3871,6 +3900,11 @@ struct anv_image {
     * VK_IMAGE_CREATE_DISJOINT_BIT.
     */
    bool disjoint;
+
+   /**
+    * Image is a WSI image
+    */
+   bool from_wsi;
 
    /**
     * Image was imported from an struct AHardwareBuffer.  We have to delay

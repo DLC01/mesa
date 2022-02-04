@@ -607,6 +607,8 @@ to_VOP3(opt_ctx& ctx, aco_ptr<Instruction>& instr)
    }
    /* we don't need to update any instr_mod_labels because they either haven't
     * been applied yet or this instruction isn't dead and so they've been ignored */
+
+   instr->pass_flags = tmp->pass_flags;
 }
 
 bool
@@ -1227,13 +1229,16 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
          else
             can_use_mod = can_use_mod && (instr->isDPP16() || can_use_VOP3(ctx, instr));
 
-         if (info.is_neg() && instr->opcode == aco_opcode::v_add_f32) {
+         unsigned bits = get_operand_size(instr, i);
+         bool mod_bitsize_compat = instr->operands[i].bytes() * 8 == bits;
+
+         if (info.is_neg() && instr->opcode == aco_opcode::v_add_f32 && mod_bitsize_compat) {
             instr->opcode = i ? aco_opcode::v_sub_f32 : aco_opcode::v_subrev_f32;
             instr->operands[i].setTemp(info.temp);
-         } else if (info.is_neg() && instr->opcode == aco_opcode::v_add_f16) {
+         } else if (info.is_neg() && instr->opcode == aco_opcode::v_add_f16 && mod_bitsize_compat) {
             instr->opcode = i ? aco_opcode::v_sub_f16 : aco_opcode::v_subrev_f16;
             instr->operands[i].setTemp(info.temp);
-         } else if (info.is_neg() && can_use_mod &&
+         } else if (info.is_neg() && can_use_mod && mod_bitsize_compat &&
                     can_eliminate_fcanonicalize(ctx, instr, info.temp)) {
             if (!instr->isDPP() && !instr->isSDWA())
                to_VOP3(ctx, instr);
@@ -1245,7 +1250,8 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
             else if (instr->isVOP3() && !instr->vop3().abs[i])
                instr->vop3().neg[i] = true;
          }
-         if (info.is_abs() && can_use_mod && can_eliminate_fcanonicalize(ctx, instr, info.temp)) {
+         if (info.is_abs() && can_use_mod && mod_bitsize_compat &&
+             can_eliminate_fcanonicalize(ctx, instr, info.temp)) {
             if (!instr->isDPP() && !instr->isSDWA())
                to_VOP3(ctx, instr);
             instr->operands[i] = Operand(info.temp);
@@ -1263,7 +1269,6 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
             continue;
          }
 
-         unsigned bits = get_operand_size(instr, i);
          if (info.is_constant(bits) && alu_can_accept_constant(instr->opcode, i) &&
              (!instr->isSDWA() || ctx.program->chip_class >= GFX9)) {
             Operand op = get_constant_op(ctx, info, bits);
@@ -3015,6 +3020,9 @@ apply_omod_clamp(opt_ctx& ctx, aco_ptr<Instruction>& instr)
    if (!ctx.uses[def_info.instr->definitions[0].tempId()])
       return false;
 
+   if (def_info.instr->definitions[0].bytes() != instr->definitions[0].bytes())
+      return false;
+
    /* MADs/FMAs are created later, so we don't have to update the original add */
    assert(!ctx.info[instr->definitions[0].tempId()].is_mad());
 
@@ -3482,8 +3490,8 @@ combine_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
     * The various comparison optimizations also currently only work with 32-bit
     * floats. */
 
-   /* neg(mul(a, b)) -> mul(neg(a), b) */
-   if (ctx.info[instr->definitions[0].tempId()].is_neg() &&
+   /* neg(mul(a, b)) -> mul(neg(a), b), abs(mul(a, b)) -> mul(abs(a), abs(b)) */
+   if ((ctx.info[instr->definitions[0].tempId()].label & (label_neg | label_abs)) &&
        ctx.uses[instr->operands[1].tempId()] == 1) {
       Temp val = ctx.info[instr->definitions[0].tempId()].temp;
 
@@ -3501,11 +3509,13 @@ combine_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
       if (mul_instr->opcode == aco_opcode::v_mul_legacy_f32 &&
           ctx.fp_mode.preserve_signed_zero_inf_nan32)
          return;
+      if (mul_instr->definitions[0].bytes() != instr->definitions[0].bytes())
+         return;
 
-      /* convert to mul(neg(a), b) */
+      /* convert to mul(neg(a), b), mul(abs(a), abs(b)) or mul(neg(abs(a)), abs(b)) */
       ctx.uses[mul_instr->definitions[0].tempId()]--;
       Definition def = instr->definitions[0];
-      /* neg(abs(mul(a, b))) -> mul(neg(abs(a)), abs(b)) */
+      bool is_neg = ctx.info[instr->definitions[0].tempId()].is_neg();
       bool is_abs = ctx.info[instr->definitions[0].tempId()].is_abs();
       instr.reset(
          create_instruction<VOP3_instruction>(mul_instr->opcode, asVOP3(Format::VOP2), 2, 1));
@@ -3515,13 +3525,17 @@ combine_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
       VOP3_instruction& new_mul = instr->vop3();
       if (mul_instr->isVOP3()) {
          VOP3_instruction& mul = mul_instr->vop3();
-         new_mul.neg[0] = mul.neg[0] && !is_abs;
-         new_mul.neg[1] = mul.neg[1] && !is_abs;
-         new_mul.abs[0] = mul.abs[0] || is_abs;
-         new_mul.abs[1] = mul.abs[1] || is_abs;
+         new_mul.neg[0] = mul.neg[0];
+         new_mul.neg[1] = mul.neg[1];
+         new_mul.abs[0] = mul.abs[0];
+         new_mul.abs[1] = mul.abs[1];
          new_mul.omod = mul.omod;
       }
-      new_mul.neg[0] ^= true;
+      if (is_abs) {
+         new_mul.neg[0] = new_mul.neg[1] = false;
+         new_mul.abs[0] = new_mul.abs[1] = true;
+      }
+      new_mul.neg[0] ^= is_neg;
       new_mul.clamp = false;
 
       ctx.info[instr->definitions[0].tempId()].set_mul(instr.get());
@@ -3557,6 +3571,9 @@ combine_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
 
          /* no clamp/omod allowed between mul and add */
          if (info.instr->isVOP3() && (info.instr->vop3().clamp || info.instr->vop3().omod))
+            continue;
+
+         if (get_operand_size(instr, i) != info.instr->definitions[0].bytes() * 8)
             continue;
 
          bool legacy = info.instr->opcode == aco_opcode::v_mul_legacy_f32;

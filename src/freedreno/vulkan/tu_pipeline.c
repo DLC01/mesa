@@ -1576,6 +1576,9 @@ tu6_emit_fs_outputs(struct tu_cs *cs,
           (fs->no_earlyz || fs->has_kill || fs->writes_pos || fs->writes_stencilref || no_earlyz || fs->writes_smask)) {
          pipeline->lrz.force_late_z = true;
       }
+
+      pipeline->drawcall_base_cost +=
+         util_bitcount(fs_render_components) / util_bitcount(0xf);
    }
 }
 
@@ -2362,6 +2365,47 @@ tu_append_executable(struct tu_pipeline *pipeline, struct ir3_shader_variant *va
    util_dynarray_append(&pipeline->executables, struct tu_pipeline_executable, exe);
 }
 
+static void
+tu_link_shaders(struct tu_pipeline_builder *builder,
+                nir_shader **shaders, unsigned shaders_count)
+{
+   nir_shader *consumer = NULL;
+   for (gl_shader_stage stage = shaders_count - 1;
+        stage >= MESA_SHADER_VERTEX; stage--) {
+      if (!shaders[stage])
+         continue;
+
+      nir_shader *producer = shaders[stage];
+      if (!consumer) {
+         consumer = producer;
+         continue;
+      }
+
+      if (nir_link_opt_varyings(producer, consumer)) {
+         NIR_PASS_V(consumer, nir_opt_constant_folding);
+         NIR_PASS_V(consumer, nir_opt_algebraic);
+         NIR_PASS_V(consumer, nir_opt_dce);
+      }
+
+      NIR_PASS_V(producer, nir_remove_dead_variables, nir_var_shader_out, NULL);
+      NIR_PASS_V(consumer, nir_remove_dead_variables, nir_var_shader_in, NULL);
+
+      bool progress = nir_remove_unused_varyings(producer, consumer);
+
+      nir_compact_varyings(producer, consumer, true);
+      if (progress) {
+         if (nir_lower_global_vars_to_local(producer)) {
+            /* Remove dead writes, which can remove input loads */
+            NIR_PASS_V(producer, nir_remove_dead_variables, nir_var_shader_temp, NULL);
+            NIR_PASS_V(producer, nir_opt_dce);
+         }
+         nir_lower_global_vars_to_local(consumer);
+      }
+
+      consumer = producer;
+   }
+}
+
 static VkResult
 tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
                                     struct tu_pipeline *pipeline)
@@ -2417,7 +2461,7 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
       }
    }
 
-   /* TODO do intra-stage linking here */
+   tu_link_shaders(builder, nir, ARRAY_SIZE(nir));
 
    uint32_t desc_sets = 0;
    for (gl_shader_stage stage = MESA_SHADER_VERTEX;
@@ -3079,6 +3123,10 @@ tu_pipeline_builder_parse_multisample_and_color_blend(
           */
          if (blendAttachment.blendEnable || blendAttachment.colorWriteMask != 0xf) {
             pipeline->lrz.force_disable_mask |= TU_LRZ_FORCE_DISABLE_WRITE;
+         }
+
+         if (blendAttachment.blendEnable) {
+            pipeline->drawcall_base_cost++;
          }
       }
    }

@@ -1419,16 +1419,16 @@ static SpvId
 emit_atomic(struct ntv_context *ctx, SpvId op, SpvId type, SpvId src0, SpvId src1, SpvId src2)
 {
    if (op == SpvOpAtomicLoad)
-      return spirv_builder_emit_triop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeWorkgroup),
+      return spirv_builder_emit_triop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeDevice),
                                        emit_uint_const(ctx, 32, 0));
    if (op == SpvOpAtomicCompareExchange)
-      return spirv_builder_emit_hexop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeWorkgroup),
+      return spirv_builder_emit_hexop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeDevice),
                                        emit_uint_const(ctx, 32, 0),
                                        emit_uint_const(ctx, 32, 0),
                                        /* these params are intentionally swapped */
                                        src2, src1);
 
-   return spirv_builder_emit_quadop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeWorkgroup),
+   return spirv_builder_emit_quadop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeDevice),
                                     emit_uint_const(ctx, 32, 0), src1);
 }
 
@@ -1614,6 +1614,19 @@ needs_derivative_control(nir_alu_instr *alu)
    }
 }
 
+static SpvId
+unswizzle_src(struct ntv_context *ctx, nir_ssa_def *ssa, SpvId src, unsigned num_components)
+{
+   /* value may have already been cast to ivec, so cast back */
+   SpvId cast_type = get_uvec_type(ctx, ssa->bit_size, num_components);
+   src = emit_bitcast(ctx, cast_type, src);
+
+   /* extract from swizzled vec */
+   SpvId type = spirv_builder_type_uint(&ctx->builder, ssa->bit_size);
+   uint32_t idx = 0;
+   return spirv_builder_emit_composite_extract(&ctx->builder, type, src, &idx, 1);
+}
+
 static void
 emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
 {
@@ -1629,6 +1642,34 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
 
    if (needs_derivative_control(alu))
       spirv_builder_emit_cap(&ctx->builder, SpvCapabilityDerivativeControl);
+
+   /* modify params here */
+   switch (alu->op) {
+   /* Offset must be an integer type scalar.
+    * Offset is the lowest-order bit of the bit field.
+    * It is consumed as an unsigned value.
+    *
+    * Count must be an integer type scalar.
+    *
+    * if these ops have more than one component in the dest, then their offset and count
+    * are swizzled like ssa_1.xxx, but only a single scalar can be provided
+    */
+   case nir_op_ubitfield_extract:
+   case nir_op_ibitfield_extract:
+      if (num_components > 1) {
+         src[1] = unswizzle_src(ctx, alu->src[1].src.ssa, src[1], num_components);
+         src[2] = unswizzle_src(ctx, alu->src[2].src.ssa, src[2], num_components);
+      }
+      break;
+   case nir_op_bitfield_insert:
+      if (num_components > 1) {
+         src[2] = unswizzle_src(ctx, alu->src[2].src.ssa, src[2], num_components);
+         src[3] = unswizzle_src(ctx, alu->src[3].src.ssa, src[3], num_components);
+      }
+      break;
+   default:
+      break;
+   }
 
    SpvId result = 0;
    switch (alu->op) {
@@ -2010,7 +2051,7 @@ emit_store_deref(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    } else
       result = emit_bitcast(ctx, type, src);
    if (nir_intrinsic_access(intr) & ACCESS_COHERENT)
-      spirv_builder_emit_atomic_store(&ctx->builder, ptr, SpvScopeWorkgroup, 0, result);
+      spirv_builder_emit_atomic_store(&ctx->builder, ptr, SpvScopeDevice, 0, result);
    else
       spirv_builder_emit_store(&ctx->builder, ptr, result);
 }
@@ -2253,12 +2294,12 @@ emit_interpolate(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 }
 
 static void
-handle_atomic_op(struct ntv_context *ctx, nir_intrinsic_instr *intr, SpvId ptr, SpvId param, SpvId param2)
+handle_atomic_op(struct ntv_context *ctx, nir_intrinsic_instr *intr, SpvId ptr, SpvId param, SpvId param2, nir_alu_type type)
 {
-   SpvId dest_type = get_dest_type(ctx, &intr->dest, nir_type_uint32);
+   SpvId dest_type = get_dest_type(ctx, &intr->dest, type);
    SpvId result = emit_atomic(ctx, get_atomic_op(intr->intrinsic), dest_type, ptr, param, param2);
    assert(result);
-   store_dest(ctx, &intr->dest, result, nir_type_uint);
+   store_dest(ctx, &intr->dest, result, type);
 }
 
 static void
@@ -2296,7 +2337,7 @@ emit_ssbo_atomic_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    if (intr->intrinsic == nir_intrinsic_ssbo_atomic_comp_swap)
       param2 = get_src(ctx, &intr->src[3]);
 
-   handle_atomic_op(ctx, intr, ptr, param, param2);
+   handle_atomic_op(ctx, intr, ptr, param, param2, nir_type_uint32);
 }
 
 static void
@@ -2317,7 +2358,7 @@ emit_shared_atomic_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    if (intr->intrinsic == nir_intrinsic_shared_atomic_comp_swap)
       param2 = get_src(ctx, &intr->src[2]);
 
-   handle_atomic_op(ctx, intr, ptr, param, param2);
+   handle_atomic_op(ctx, intr, ptr, param, param2, nir_type_uint32);
 }
 
 static void
@@ -2474,13 +2515,24 @@ emit_image_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    type_to_dim(glsl_get_sampler_dim(type), &is_ms);
    SpvId sample = is_ms ? get_src(ctx, &intr->src[2]) : emit_uint_const(ctx, 32, 0);
    SpvId coord = get_image_coords(ctx, type, &intr->src[1]);
-   SpvId base_type = get_glsl_basetype(ctx, glsl_get_sampler_result_type(type));
+   enum glsl_base_type glsl_type = glsl_get_sampler_result_type(type);
+   SpvId base_type = get_glsl_basetype(ctx, glsl_type);
    SpvId texel = spirv_builder_emit_image_texel_pointer(&ctx->builder, base_type, img_var, coord, sample);
    SpvId param2 = 0;
 
-   if (intr->intrinsic == nir_intrinsic_image_deref_atomic_comp_swap)
+   /* The type of Value must be the same as Result Type.
+    * The type of the value pointed to by Pointer must be the same as Result Type.
+    */
+   nir_alu_type ntype = nir_get_nir_type_for_glsl_base_type(glsl_type);
+   SpvId cast_type = get_dest_type(ctx, &intr->dest, ntype);
+   param = emit_bitcast(ctx, cast_type, param);
+
+   if (intr->intrinsic == nir_intrinsic_image_deref_atomic_comp_swap) {
       param2 = get_src(ctx, &intr->src[4]);
-   handle_atomic_op(ctx, intr, texel, param, param2);
+      param2 = emit_bitcast(ctx, cast_type, param2);
+   }
+
+   handle_atomic_op(ctx, intr, texel, param, param2, ntype);
 }
 
 static void

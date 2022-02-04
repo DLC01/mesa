@@ -1224,7 +1224,7 @@ tu6_clear_lrz(struct tu_cmd_buffer *cmd,
               VK_SAMPLE_COUNT_1_BIT);
    ops->clear_value(cs, PIPE_FORMAT_Z16_UNORM, value);
    ops->dst_buffer(cs, PIPE_FORMAT_Z16_UNORM,
-                   image->bo->iova + image->bo_offset + image->lrz_offset,
+                   image->iova + image->lrz_offset,
                    image->lrz_pitch * 2);
    ops->coords(cs, &(VkOffset2D) {}, NULL, &(VkExtent2D) {image->lrz_pitch, image->lrz_height});
    ops->run(cmd, cs);
@@ -1252,7 +1252,7 @@ tu_image_view_copy_blit(struct fdl6_view *iview,
       &image->layout[tu6_plane_index(image->vk_format, aspect_mask)];
 
    fdl6_view_init(iview, &layout, &(struct fdl_view_args) {
-      .iova = image->bo->iova + image->bo_offset,
+      .iova = image->iova,
       .base_array_layer = subres->baseArrayLayer + layer,
       .layer_count = 1,
       .base_miplevel = subres->mipLevel,
@@ -1524,7 +1524,7 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
    for (uint32_t i = 0; i < layers; i++) {
       ops->dst(cs, &dst, i);
 
-      uint64_t src_va = tu_buffer_iova(src_buffer) + info->bufferOffset + layer_size * i;
+      uint64_t src_va = src_buffer->iova + info->bufferOffset + layer_size * i;
       if ((src_va & 63) || (pitch & 63)) {
          for (uint32_t y = 0; y < extent.height; y++) {
             uint32_t x = (src_va & 63) / util_format_get_blocksize(src_format);
@@ -1602,7 +1602,7 @@ tu_copy_image_to_buffer(struct tu_cmd_buffer *cmd,
    for (uint32_t i = 0; i < layers; i++) {
       ops->src(cmd, cs, &src, i, VK_FILTER_NEAREST);
 
-      uint64_t dst_va = tu_buffer_iova(dst_buffer) + info->bufferOffset + layer_size * i;
+      uint64_t dst_va = dst_buffer->iova + info->bufferOffset + layer_size * i;
       if ((dst_va & 63) || (pitch & 63)) {
          for (uint32_t y = 0; y < extent.height; y++) {
             uint32_t x = (dst_va & 63) / util_format_get_blocksize(dst_format);
@@ -1915,8 +1915,8 @@ tu_CmdCopyBuffer2KHR(VkCommandBuffer commandBuffer,
    for (unsigned i = 0; i < pCopyBufferInfo->regionCount; ++i) {
       const VkBufferCopy2KHR *region = &pCopyBufferInfo->pRegions[i];
       copy_buffer(cmd,
-                  tu_buffer_iova(dst_buffer) + region->dstOffset,
-                  tu_buffer_iova(src_buffer) + region->srcOffset,
+                  dst_buffer->iova + region->dstOffset,
+                  src_buffer->iova + region->srcOffset,
                   region->size, 1);
    }
 }
@@ -1939,7 +1939,7 @@ tu_CmdUpdateBuffer(VkCommandBuffer commandBuffer,
    }
 
    memcpy(tmp.map, pData, dataSize);
-   copy_buffer(cmd, tu_buffer_iova(buffer) + dstOffset, tmp.iova, dataSize, 4);
+   copy_buffer(cmd, buffer->iova + dstOffset, tmp.iova, dataSize, 4);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1957,7 +1957,7 @@ tu_CmdFillBuffer(VkCommandBuffer commandBuffer,
    if (fillSize == VK_WHOLE_SIZE)
       fillSize = buffer->size - dstOffset;
 
-   uint64_t dst_va = tu_buffer_iova(buffer) + dstOffset;
+   uint64_t dst_va = buffer->iova + dstOffset;
    uint32_t blocks = fillSize / 4;
 
    ops->setup(cmd, cs, PIPE_FORMAT_R32_UINT, VK_IMAGE_ASPECT_COLOR_BIT, 0, true, false,

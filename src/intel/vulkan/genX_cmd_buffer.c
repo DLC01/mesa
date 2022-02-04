@@ -673,6 +673,7 @@ transition_depth_buffer(struct anv_cmd_buffer *cmd_buffer,
    }
 }
 
+#if GFX_VER == 7
 static inline bool
 vk_image_layout_stencil_write_optimal(VkImageLayout layout)
 {
@@ -680,6 +681,7 @@ vk_image_layout_stencil_write_optimal(VkImageLayout layout)
           layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL ||
           layout == VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL_KHR;
 }
+#endif
 
 /* Transitions a HiZ-enabled depth buffer from one layout to another. Unless
  * the initial layout is undefined, the HiZ buffer and depth buffer will
@@ -2567,8 +2569,6 @@ void genX(CmdPipelineBarrier2KHR)(
 static void
 cmd_buffer_alloc_push_constants(struct anv_cmd_buffer *cmd_buffer)
 {
-   assert(anv_pipeline_is_primitive(cmd_buffer->state.gfx.pipeline));
-
    VkShaderStageFlags stages =
       cmd_buffer->state.gfx.pipeline->active_stages;
 
@@ -2577,7 +2577,9 @@ cmd_buffer_alloc_push_constants(struct anv_cmd_buffer *cmd_buffer)
     * uses push concstants, this may be suboptimal.  However, avoiding stalls
     * seems more important.
     */
-   stages |= VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT;
+   stages |= VK_SHADER_STAGE_FRAGMENT_BIT;
+   if (anv_pipeline_is_primitive(cmd_buffer->state.gfx.pipeline))
+      stages |= VK_SHADER_STAGE_VERTEX_BIT;
 
    if (stages == cmd_buffer->state.gfx.push_constant_stages)
       return;
@@ -3529,6 +3531,64 @@ cmd_buffer_flush_push_constants(struct anv_cmd_buffer *cmd_buffer,
    cmd_buffer->state.push_constants_dirty &= ~flushed;
 }
 
+#if GFX_VERx10 >= 125
+static void
+cmd_buffer_flush_mesh_inline_data(struct anv_cmd_buffer *cmd_buffer,
+                                  VkShaderStageFlags dirty_stages)
+{
+   struct anv_cmd_graphics_state *gfx_state = &cmd_buffer->state.gfx;
+   const struct anv_graphics_pipeline *pipeline = gfx_state->pipeline;
+
+   if (dirty_stages & VK_SHADER_STAGE_TASK_BIT_NV &&
+       anv_pipeline_has_stage(pipeline, MESA_SHADER_TASK)) {
+
+      const struct anv_shader_bin *shader = pipeline->shaders[MESA_SHADER_TASK];
+      const struct anv_pipeline_bind_map *bind_map = &shader->bind_map;
+
+      anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_TASK_SHADER_DATA), data) {
+         const struct anv_push_range *range = &bind_map->push_ranges[0];
+         if (range->length > 0) {
+            struct anv_address buffer =
+               get_push_range_address(cmd_buffer, shader, range);
+
+            uint64_t addr = anv_address_physical(buffer);
+            data.InlineData[0] = addr & 0xffffffff;
+            data.InlineData[1] = addr >> 32;
+
+            memcpy(&data.InlineData[BRW_TASK_MESH_PUSH_CONSTANTS_START_DW],
+                   cmd_buffer->state.gfx.base.push_constants.client_data,
+                   BRW_TASK_MESH_PUSH_CONSTANTS_SIZE_DW * 4);
+         }
+      }
+   }
+
+   if (dirty_stages & VK_SHADER_STAGE_MESH_BIT_NV &&
+       anv_pipeline_has_stage(pipeline, MESA_SHADER_MESH)) {
+
+      const struct anv_shader_bin *shader = pipeline->shaders[MESA_SHADER_MESH];
+      const struct anv_pipeline_bind_map *bind_map = &shader->bind_map;
+
+      anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_MESH_SHADER_DATA), data) {
+         const struct anv_push_range *range = &bind_map->push_ranges[0];
+         if (range->length > 0) {
+            struct anv_address buffer =
+               get_push_range_address(cmd_buffer, shader, range);
+
+            uint64_t addr = anv_address_physical(buffer);
+            data.InlineData[0] = addr & 0xffffffff;
+            data.InlineData[1] = addr >> 32;
+
+            memcpy(&data.InlineData[BRW_TASK_MESH_PUSH_CONSTANTS_START_DW],
+                   cmd_buffer->state.gfx.base.push_constants.client_data,
+                   BRW_TASK_MESH_PUSH_CONSTANTS_SIZE_DW * 4);
+         }
+      }
+   }
+
+   cmd_buffer->state.push_constants_dirty &= ~dirty_stages;
+}
+#endif
+
 static void
 cmd_buffer_emit_clip(struct anv_cmd_buffer *cmd_buffer)
 {
@@ -3574,6 +3634,7 @@ cmd_buffer_emit_clip(struct anv_cmd_buffer *cmd_buffer)
    };
    uint32_t dwords[GENX(3DSTATE_CLIP_length)];
 
+   /* TODO(mesh): Multiview. */
    struct anv_graphics_pipeline *pipeline = cmd_buffer->state.gfx.pipeline;
    if (anv_pipeline_is_primitive(pipeline)) {
       const struct brw_vue_prog_data *last =
@@ -3837,6 +3898,11 @@ genX(cmd_buffer_flush_state)(struct anv_cmd_buffer *cmd_buffer)
       dirty |= cmd_buffer->state.push_constants_dirty;
       cmd_buffer_flush_push_constants(cmd_buffer,
                                       dirty & VK_SHADER_STAGE_ALL_GRAPHICS);
+#if GFX_VERx10 >= 125
+      cmd_buffer_flush_mesh_inline_data(
+         cmd_buffer, dirty & (VK_SHADER_STAGE_TASK_BIT_NV |
+                              VK_SHADER_STAGE_MESH_BIT_NV));
+#endif
    }
 
    if (dirty & VK_SHADER_STAGE_ALL_GRAPHICS) {
@@ -4835,6 +4901,158 @@ void genX(CmdEndTransformFeedbackEXT)(
    cmd_buffer->state.xfb_enabled = false;
    cmd_buffer->state.gfx.dirty |= ANV_CMD_DIRTY_XFB_ENABLE;
 }
+
+#if GFX_VERx10 >= 125
+void
+genX(CmdDrawMeshTasksNV)(
+    VkCommandBuffer                             commandBuffer,
+    uint32_t                                    taskCount,
+    uint32_t                                    firstTask)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+
+   if (anv_batch_has_error(&cmd_buffer->batch))
+      return;
+
+   /* TODO(mesh): Check if this is not emitting more packets than we need. */
+   genX(cmd_buffer_flush_state)(cmd_buffer);
+
+   if (cmd_buffer->state.conditional_render_enabled)
+      genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
+
+   /* BSpec 54016 says: "The values passed for Starting ThreadGroup ID X
+    * and ThreadGroup Count X shall not cause TGIDs to exceed (2^32)-1."
+    */
+   assert((int64_t)firstTask + taskCount - 1 <= UINT32_MAX);
+
+   anv_batch_emit(&cmd_buffer->batch, GENX(3DMESH_1D), m) {
+      m.PredicateEnable = cmd_buffer->state.conditional_render_enabled;
+      m.ThreadGroupCountX = taskCount;
+      m.StartingThreadGroupIDX = firstTask;
+   }
+}
+
+#define GFX125_3DMESH_TG_COUNT 0x26F0
+#define GFX125_3DMESH_STARTING_TGID 0x26F4
+#define GFX10_3DPRIM_XP(n) (0x2690 + (n) * 4) /* n = { 0, 1, 2 } */
+
+static void
+mesh_load_indirect_parameters(struct anv_cmd_buffer *cmd_buffer,
+                              struct mi_builder *b,
+                              struct anv_address addr,
+                              bool emit_xp0,
+                              uint32_t xp0)
+{
+   const size_t taskCountOff = offsetof(VkDrawMeshTasksIndirectCommandNV, taskCount);
+   const size_t firstTaskOff = offsetof(VkDrawMeshTasksIndirectCommandNV, firstTask);
+
+   mi_store(b, mi_reg32(GFX125_3DMESH_TG_COUNT),
+               mi_mem32(anv_address_add(addr, taskCountOff)));
+
+   mi_store(b, mi_reg32(GFX125_3DMESH_STARTING_TGID),
+               mi_mem32(anv_address_add(addr, firstTaskOff)));
+
+   if (emit_xp0)
+      mi_store(b, mi_reg32(GFX10_3DPRIM_XP(0)), mi_imm(xp0));
+}
+
+static void
+emit_indirect_3dmesh_1d(struct anv_batch *batch,
+                        bool predicate_enable,
+                        bool uses_drawid)
+{
+   uint32_t len = GENX(3DMESH_1D_length) + uses_drawid;
+   anv_batch_emitn(batch, len, GENX(3DMESH_1D),
+                   .PredicateEnable           = predicate_enable,
+                   .IndirectParameterEnable   = true,
+                   .ExtendedParameter0Present = uses_drawid);
+}
+
+void
+genX(CmdDrawMeshTasksIndirectNV)(
+    VkCommandBuffer                             commandBuffer,
+    VkBuffer                                    _buffer,
+    VkDeviceSize                                offset,
+    uint32_t                                    drawCount,
+    uint32_t                                    stride)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   ANV_FROM_HANDLE(anv_buffer, buffer, _buffer);
+   struct anv_graphics_pipeline *pipeline = cmd_buffer->state.gfx.pipeline;
+   const struct brw_task_prog_data *task_prog_data = get_task_prog_data(pipeline);
+   const struct brw_mesh_prog_data *mesh_prog_data = get_mesh_prog_data(pipeline);
+   struct anv_cmd_state *cmd_state = &cmd_buffer->state;
+
+   if (anv_batch_has_error(&cmd_buffer->batch))
+      return;
+
+   genX(cmd_buffer_flush_state)(cmd_buffer);
+
+   if (cmd_state->conditional_render_enabled)
+      genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
+
+   bool uses_drawid = (task_prog_data && task_prog_data->uses_drawid) ||
+                       mesh_prog_data->uses_drawid;
+   struct mi_builder b;
+   mi_builder_init(&b, &cmd_buffer->device->info, &cmd_buffer->batch);
+
+   for (uint32_t i = 0; i < drawCount; i++) {
+      struct anv_address draw = anv_address_add(buffer->address, offset);
+
+      mesh_load_indirect_parameters(cmd_buffer, &b, draw, uses_drawid, i);
+
+      emit_indirect_3dmesh_1d(&cmd_buffer->batch,
+            cmd_state->conditional_render_enabled, uses_drawid);
+
+      offset += stride;
+   }
+}
+
+void
+genX(CmdDrawMeshTasksIndirectCountNV)(
+    VkCommandBuffer                             commandBuffer,
+    VkBuffer                                    _buffer,
+    VkDeviceSize                                offset,
+    VkBuffer                                    _countBuffer,
+    VkDeviceSize                                countBufferOffset,
+    uint32_t                                    maxDrawCount,
+    uint32_t                                    stride)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   ANV_FROM_HANDLE(anv_buffer, buffer, _buffer);
+   ANV_FROM_HANDLE(anv_buffer, count_buffer, _countBuffer);
+   struct anv_graphics_pipeline *pipeline = cmd_buffer->state.gfx.pipeline;
+   const struct brw_task_prog_data *task_prog_data = get_task_prog_data(pipeline);
+   const struct brw_mesh_prog_data *mesh_prog_data = get_mesh_prog_data(pipeline);
+
+   if (anv_batch_has_error(&cmd_buffer->batch))
+      return;
+
+   genX(cmd_buffer_flush_state)(cmd_buffer);
+
+   bool uses_drawid = (task_prog_data && task_prog_data->uses_drawid) ||
+                       mesh_prog_data->uses_drawid;
+
+   struct mi_builder b;
+   mi_builder_init(&b, &cmd_buffer->device->info, &cmd_buffer->batch);
+
+   struct mi_value max =
+         prepare_for_draw_count_predicate(cmd_buffer, &b,
+                                          count_buffer, countBufferOffset);
+
+   for (uint32_t i = 0; i < maxDrawCount; i++) {
+      struct anv_address draw = anv_address_add(buffer->address, offset);
+
+      emit_draw_count_predicate_cond(cmd_buffer, &b, i, max);
+
+      mesh_load_indirect_parameters(cmd_buffer, &b, draw, uses_drawid, i);
+
+      emit_indirect_3dmesh_1d(&cmd_buffer->batch, true, uses_drawid);
+
+      offset += stride;
+   }
+}
+#endif /* GFX_VERx10 >= 125 */
 
 void
 genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
@@ -6009,6 +6227,42 @@ cmd_buffer_emit_depth_stencil(struct anv_cmd_buffer *cmd_buffer)
    cmd_buffer->state.hiz_enabled = isl_aux_usage_has_hiz(info.hiz_usage);
 }
 
+static void
+cmd_buffer_emit_cps_control_buffer(struct anv_cmd_buffer *cmd_buffer)
+{
+#if GFX_VERx10 >= 125
+   struct anv_device *device = cmd_buffer->device;
+
+   if (!device->vk.enabled_extensions.KHR_fragment_shading_rate)
+      return;
+
+   uint32_t *dw = anv_batch_emit_dwords(&cmd_buffer->batch,
+                                        device->isl_dev.cpb.size / 4);
+   if (dw == NULL)
+      return;
+
+   struct isl_cpb_emit_info info = { };
+
+   const struct anv_image_view *fsr_iview =
+      anv_cmd_buffer_get_fsr_view(cmd_buffer);
+   if (fsr_iview) {
+      info.view = &fsr_iview->planes[0].isl;
+      info.surf = &fsr_iview->image->planes[0].primary_surface.isl;
+      info.address =
+         anv_batch_emit_reloc(&cmd_buffer->batch,
+                              dw + device->isl_dev.cpb.offset / 4,
+                              fsr_iview->image->bindings[0].address.bo,
+                              fsr_iview->image->bindings[0].address.offset +
+                              fsr_iview->image->bindings[0].memory_range.offset);
+      info.mocs =
+         anv_mocs(device, fsr_iview->image->bindings[0].address.bo,
+                  ISL_SURF_USAGE_CPB_BIT);
+   }
+
+   isl_emit_cpb_control_s(&device->isl_dev, dw, &info);
+#endif /* GFX_VERx10 >= 125 */
+}
+
 /**
  * This ANDs the view mask of the current subpass with the pending clear
  * views in the attachment to get the mask of views active in the subpass
@@ -6267,12 +6521,13 @@ cmd_buffer_begin_subpass(struct anv_cmd_buffer *cmd_buffer,
          continue;
 
       assert(a < cmd_state->pass->attachment_count);
+      struct anv_subpass_attachment *att = &subpass->attachments[i];
       struct anv_attachment_state *att_state = &cmd_state->attachments[a];
 
-      struct anv_image_view *iview = cmd_state->attachments[a].image_view;
+      struct anv_image_view *iview = att_state->image_view;
       const struct anv_image *image = iview->image;
 
-      VkImageLayout target_layout = subpass->attachments[i].layout;
+      VkImageLayout target_layout = att->layout;
       VkImageLayout target_stencil_layout =
          subpass->attachments[i].stencil_layout;
 
@@ -6291,6 +6546,22 @@ cmd_buffer_begin_subpass(struct anv_cmd_buffer *cmd_buffer,
       } else {
          base_layer = iview->planes[0].isl.base_array_layer;
          layer_count = fb->layers;
+      }
+
+      /* Treat the fragment shading rate attachment as color. But make sure we
+       * don't use fb->layers if the fragment shading rate attachment only has
+       * one layer.
+       *
+       * Vulkan spec 1.2.170 - VkFramebufferCreateInfo :
+       *
+       *    "each element of pAttachments that is used as a fragment shading
+       *     rate attachment by renderPass must have a layerCount that is
+       *     either 1, or greater than layers"
+       */
+      if ((att->usage & VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR) &&
+          iview->planes[0].isl.array_len == 1) {
+         base_layer = 0;
+         layer_count = 1;
       }
 
       if (image->vk.aspects & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV) {
@@ -6462,6 +6733,8 @@ cmd_buffer_begin_subpass(struct anv_cmd_buffer *cmd_buffer,
 #endif
 
    cmd_buffer_emit_depth_stencil(cmd_buffer);
+
+   cmd_buffer_emit_cps_control_buffer(cmd_buffer);
 }
 
 static enum blorp_filter
@@ -6818,8 +7091,9 @@ cmd_buffer_do_layout_transitions(struct anv_cmd_buffer *cmd_buffer,
          continue;
 
       assert(a < cmd_state->pass->attachment_count);
+      struct anv_subpass_attachment *att = &subpass->attachments[i];
       struct anv_attachment_state *att_state = &cmd_state->attachments[a];
-      struct anv_image_view *iview = cmd_state->attachments[a].image_view;
+      struct anv_image_view *iview = att_state->image_view;
       const struct anv_image *image = iview->image;
 
       /* Transition the image into the final layout for this render pass */
@@ -6836,6 +7110,22 @@ cmd_buffer_do_layout_transitions(struct anv_cmd_buffer *cmd_buffer,
       } else {
          base_layer = iview->planes[0].isl.base_array_layer;
          layer_count = fb->layers;
+      }
+
+      /* Treat the fragment shading rate attachment as color. But make sure we
+       * don't use fb->layers if the fragment shading rate attachment only has
+       * one layer.
+       *
+       * Vulkan spec 1.2.170 - VkFramebufferCreateInfo :
+       *
+       *    "each element of pAttachments that is used as a fragment shading
+       *     rate attachment by renderPass must have a layerCount that is
+       *     either 1, or greater than layers"
+       */
+      if (att->usage & VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR &&
+          iview->planes[0].isl.array_len == 1) {
+         base_layer = 0;
+         layer_count = 1;
       }
 
       if (image->vk.aspects & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV) {
@@ -6988,12 +7278,14 @@ genX(cmd_buffer_setup_attachments_dynrender)(struct anv_cmd_buffer *cmd_buffer,
                                              const VkRenderingInfoKHR *info)
 {
    struct anv_cmd_state *state = &cmd_buffer->state;
-   uint32_t att_count = state->pass->attachment_count;
+   struct anv_render_pass *pass = state->pass;
+   struct anv_subpass *subpass = state->subpass;
    bool suspending = info->flags & VK_RENDERING_SUSPENDING_BIT_KHR;
    bool resuming = info->flags & VK_RENDERING_RESUMING_BIT_KHR;
    VkResult result;
 
-   result = cmd_buffer_alloc_state_attachments(cmd_buffer, att_count);
+   result = cmd_buffer_alloc_state_attachments(cmd_buffer,
+                                               pass->attachment_count);
    if (result != VK_SUCCESS)
       return result;
 
@@ -7041,71 +7333,88 @@ genX(cmd_buffer_setup_attachments_dynrender)(struct anv_cmd_buffer *cmd_buffer,
       }
 
       if (!suspending && att->resolveMode != VK_RESOLVE_MODE_NONE) {
-         state->attachments[i + info->colorAttachmentCount].image_view =
+         struct anv_attachment_state *resolve_att =
+            &state->attachments[i + info->colorAttachmentCount];
+         resolve_att->image_view =
             anv_image_view_from_handle(att->resolveImageView);
+         resolve_att->aux_usage =
+            anv_layout_to_aux_usage(&cmd_buffer->device->info,
+                                    resolve_att->image_view->image,
+                                    VK_IMAGE_ASPECT_COLOR_BIT,
+                                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                    att->resolveImageLayout);
       }
    }
 
-   const VkRenderingAttachmentInfoKHR *d_att = info->pDepthAttachment;
-   const VkRenderingAttachmentInfoKHR *s_att = info->pStencilAttachment;
-   const VkRenderingAttachmentInfoKHR *d_or_s_att = d_att ? d_att : s_att;
-   if (d_or_s_att && d_or_s_att->imageView) {
-      uint32_t ds_idx = att_count - 1;
+   if (subpass->depth_stencil_attachment) {
+      const VkRenderingAttachmentInfoKHR *d_att_info = info->pDepthAttachment;
+      const VkRenderingAttachmentInfoKHR *s_att_info = info->pStencilAttachment;
+      const VkRenderingAttachmentInfoKHR *d_or_s_att_info =
+         d_att_info ? d_att_info : s_att_info;
 
-      if (!suspending && d_or_s_att->resolveImageView) {
-         state->attachments[ds_idx].image_view =
-            anv_image_view_from_handle(d_or_s_att->resolveImageView);
-         ds_idx -= 1;
+      struct anv_attachment_state *ds_att_state =
+         &state->attachments[subpass->depth_stencil_attachment->attachment];
+      ds_att_state->image_view =
+         anv_image_view_from_handle(d_or_s_att_info->imageView);
+
+      if (subpass->ds_resolve_attachment) {
+         struct anv_attachment_state *ds_res_att_state =
+            &state->attachments[subpass->ds_resolve_attachment->attachment];
+         ds_res_att_state->image_view =
+            anv_image_view_from_handle(d_or_s_att_info->resolveImageView);
+         VkImageAspectFlagBits ds_aspect =
+            (d_att_info ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) |
+            (s_att_info ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+         ds_res_att_state->aux_usage =
+            anv_layout_to_aux_usage(&cmd_buffer->device->info,
+                                    ds_res_att_state->image_view->image,
+                                    ds_aspect,
+                                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                    d_or_s_att_info->resolveImageLayout);
       }
-
-      struct anv_attachment_state *att_state = &state->attachments[ds_idx];
-
-      att_state->image_view =
-         anv_image_view_from_handle(d_or_s_att->imageView);
 
       VkImageAspectFlags clear_aspects = 0;
-      if (d_att && d_att->imageView) {
-         VkAttachmentLoadOp load_op = get_effective_load_op(d_att->loadOp, resuming);
-         if (load_op == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+      if (d_att_info && d_att_info->imageView) {
+         VkAttachmentLoadOp load_op =
+            get_effective_load_op(d_att_info->loadOp, resuming);
+         if (load_op == VK_ATTACHMENT_LOAD_OP_CLEAR)
             clear_aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
-         }
 
-         att_state->aux_usage =
+         ds_att_state->aux_usage =
             anv_layout_to_aux_usage(&cmd_buffer->device->info,
-                                    att_state->image_view->image,
+                                    ds_att_state->image_view->image,
                                     VK_IMAGE_ASPECT_DEPTH_BIT,
                                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                                    d_att->imageLayout);
+                                    d_att_info->imageLayout);
 
-         att_state->current_layout = d_att->imageLayout;
+         ds_att_state->current_layout = d_att_info->imageLayout;
       }
-      if (s_att && s_att->imageView) {
-         VkAttachmentLoadOp load_op = get_effective_load_op(s_att->loadOp, resuming);
-         if (load_op == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+      if (s_att_info && s_att_info->imageView) {
+         VkAttachmentLoadOp load_op =
+            get_effective_load_op(s_att_info->loadOp, resuming);
+         if (load_op == VK_ATTACHMENT_LOAD_OP_CLEAR)
             clear_aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
-         }
 
-         att_state->current_stencil_layout = s_att->imageLayout;
+         ds_att_state->current_stencil_layout = s_att_info->imageLayout;
       }
 
-      att_state->pending_clear_aspects = clear_aspects;
-      att_state->clear_value = d_or_s_att->clearValue;
+      ds_att_state->pending_clear_aspects = clear_aspects;
+      ds_att_state->clear_value = d_or_s_att_info->clearValue;
 
       if (clear_aspects) {
-         struct anv_image_view *iview = att_state->image_view;
+         struct anv_image_view *iview = ds_att_state->image_view;
 
          const uint32_t num_layers = iview->planes[0].isl.array_len;
-         att_state->pending_clear_views = (1 << num_layers) - 1;
+         ds_att_state->pending_clear_views = (1 << num_layers) - 1;
 
-         att_state->fast_clear =
+         ds_att_state->fast_clear =
             anv_can_hiz_clear_ds_view(cmd_buffer->device, iview,
-                                      att_state->current_layout,
+                                      ds_att_state->current_layout,
                                       clear_aspects,
-                                      att_state->clear_value.depthStencil.depth,
+                                      ds_att_state->clear_value.depthStencil.depth,
                                       info->renderArea);
 
          uint32_t level = iview->planes[0].isl.base_level;
-
          uint32_t base_layer, layer_count;
          if (iview->image->vk.image_type == VK_IMAGE_TYPE_3D) {
             base_layer = 0;
@@ -7115,9 +7424,21 @@ genX(cmd_buffer_setup_attachments_dynrender)(struct anv_cmd_buffer *cmd_buffer,
             layer_count = info->layerCount;
          }
 
-         clear_depth_stencil_attachment(cmd_buffer, att_state, level,
+         clear_depth_stencil_attachment(cmd_buffer, ds_att_state, level,
                                         base_layer, layer_count);
       }
+   }
+
+   if (subpass->fsr_attachment) {
+      const VkRenderingFragmentShadingRateAttachmentInfoKHR *fsr_att_info =
+         vk_find_struct_const(info->pNext,
+                              RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR);
+      assert(fsr_att_info);
+
+      struct anv_attachment_state *fsr_att_state =
+         &state->attachments[subpass->fsr_attachment->attachment];
+      fsr_att_state->image_view =
+         anv_image_view_from_handle(fsr_att_info->imageView);
    }
 
    return VK_SUCCESS;
@@ -7230,6 +7551,8 @@ cmd_buffer_begin_rendering(struct anv_cmd_buffer *cmd_buffer,
 #endif
 
    cmd_buffer_emit_depth_stencil(cmd_buffer);
+
+   cmd_buffer_emit_cps_control_buffer(cmd_buffer);
 }
 
 static void

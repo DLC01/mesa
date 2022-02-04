@@ -23,19 +23,18 @@
 
 #include "d3d12_compute_transforms.h"
 #include "d3d12_nir_passes.h"
+#include "d3d12_query.h"
+#include "d3d12_screen.h"
 
 #include "nir.h"
 #include "nir_builder.h"
 
-#include "nir_to_dxil.h"
-
 #include "util/u_memory.h"
 
 nir_shader *
-get_indirect_draw_base_vertex_transform(const d3d12_compute_transform_key *args)
+get_indirect_draw_base_vertex_transform(const nir_shader_compiler_options *options, const d3d12_compute_transform_key *args)
 {
-   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, 
-      dxil_get_nir_compiler_options(), "TransformIndirectDrawBaseVertex");
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, options, "TransformIndirectDrawBaseVertex");
 
    if (args->base_vertex.dynamic_count) {
       nir_variable *count_ubo = nir_variable_create(b.shader, nir_var_mem_ubo,
@@ -52,7 +51,8 @@ get_indirect_draw_base_vertex_transform(const d3d12_compute_transform_key *args)
 
    nir_ssa_def *draw_id = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
    if (args->base_vertex.dynamic_count) {
-      nir_ssa_def *count = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 1), nir_imm_int(&b, 0));
+      nir_ssa_def *count = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 1), nir_imm_int(&b, 0),
+         (gl_access_qualifier)0, 4, 0, 0, 4);
       nir_push_if(&b, nir_ilt(&b, draw_id, count));
    }
 
@@ -101,11 +101,129 @@ get_indirect_draw_base_vertex_transform(const d3d12_compute_transform_key *args)
 }
 
 static struct nir_shader *
-create_compute_transform(const d3d12_compute_transform_key *key)
+get_fake_so_buffer_copy_back(const nir_shader_compiler_options *options, const d3d12_compute_transform_key *key)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, options, "FakeSOBufferCopyBack");
+
+   nir_variable *output_so_data_var = nir_variable_create(b.shader, nir_var_mem_ssbo,
+      glsl_array_type(glsl_uint_type(), 0, 0), "output_data");
+   nir_variable *input_so_data_var = nir_variable_create(b.shader, nir_var_mem_ssbo, output_so_data_var->type, "input_data");
+   output_so_data_var->data.driver_location = 0;
+   input_so_data_var->data.driver_location = 1;
+
+   /* UBO is [fake SO filled size, fake SO vertex count, 1, 1, original SO filled size] */
+   nir_variable *input_ubo = nir_variable_create(b.shader, nir_var_mem_ubo,
+      glsl_array_type(glsl_uint_type(), 5, 0), "input_ubo");
+   input_ubo->data.driver_location = 0;
+
+   nir_ssa_def *original_so_filled_size = nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0), nir_imm_int(&b, 4 * sizeof(uint32_t)),
+      (gl_access_qualifier)0, 4, 0, 4 * sizeof(uint32_t), 4);
+
+   nir_variable *state_var = nullptr;
+   nir_ssa_def *fake_so_multiplier = d3d12_get_state_var(&b, D3D12_STATE_VAR_TRANSFORM_GENERIC0, "fake_so_multiplier", glsl_uint_type(), &state_var);
+
+   nir_ssa_def *vertex_offset = nir_imul(&b, nir_imm_int(&b, key->fake_so_buffer_copy_back.stride),
+      nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0));
+
+   nir_ssa_def *output_offset_base = nir_iadd(&b, original_so_filled_size, vertex_offset);
+   nir_ssa_def *input_offset_base = nir_imul(&b, vertex_offset, fake_so_multiplier);
+
+   for (unsigned i = 0; i < key->fake_so_buffer_copy_back.num_ranges; ++i) {
+      auto& output = key->fake_so_buffer_copy_back.ranges[i];
+      assert(output.size % 4 == 0 && output.offset % 4 == 0);
+      nir_ssa_def *field_offset = nir_imm_int(&b, output.offset);
+      nir_ssa_def *output_offset = nir_iadd(&b, output_offset_base, field_offset);
+      nir_ssa_def *input_offset = nir_iadd(&b, input_offset_base, field_offset);
+
+      for (unsigned loaded = 0; loaded < output.size; loaded += 16) {
+         unsigned to_load = MIN2(output.size, 16);
+         unsigned components = to_load / 4;
+         nir_ssa_def *loaded_data = nir_load_ssbo(&b, components, 32, nir_imm_int(&b, 1),
+            nir_iadd(&b, input_offset, nir_imm_int(&b, loaded)), (gl_access_qualifier)0, 4, 0);
+         nir_store_ssbo(&b, loaded_data, nir_imm_int(&b, 0),
+            nir_iadd(&b, output_offset, nir_imm_int(&b, loaded)), (1u << components) - 1, (gl_access_qualifier)0, 4, 0);
+      }
+   }
+
+   nir_validate_shader(b.shader, "creation");
+   b.shader->info.num_ssbos = 2;
+   b.shader->info.num_ubos = 1;
+
+   return b.shader;
+}
+
+static struct nir_shader *
+get_fake_so_buffer_vertex_count(const nir_shader_compiler_options *options)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, options, "FakeSOBufferVertexCount");
+
+   nir_variable_create(b.shader, nir_var_mem_ssbo, glsl_array_type(glsl_uint_type(), 0, 0), "fake_so");
+   nir_ssa_def *fake_buffer_filled_size = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0), nir_imm_int(&b, 0), (gl_access_qualifier)0, 4, 0);
+
+   nir_variable *real_so_var = nir_variable_create(b.shader, nir_var_mem_ssbo,
+      glsl_array_type(glsl_uint_type(), 0, 0), "real_so");
+   real_so_var->data.driver_location = 1;
+   nir_ssa_def *real_buffer_filled_size = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 1), nir_imm_int(&b, 0), (gl_access_qualifier)0, 4, 0);
+
+   nir_variable *state_var = nullptr;
+   nir_ssa_def *state_var_data = d3d12_get_state_var(&b, D3D12_STATE_VAR_TRANSFORM_GENERIC0, "state_var", glsl_uvec4_type(), &state_var);
+   nir_ssa_def *stride = nir_channel(&b, state_var_data, 0);
+   nir_ssa_def *fake_so_multiplier = nir_channel(&b, state_var_data, 1);
+
+   nir_ssa_def *real_so_bytes_added = nir_idiv(&b, fake_buffer_filled_size, fake_so_multiplier);
+   nir_ssa_def *vertex_count = nir_idiv(&b, real_so_bytes_added, stride);
+   nir_ssa_def *to_write_to_fake_buffer = nir_vec4(&b, vertex_count, nir_imm_int(&b, 1), nir_imm_int(&b, 1), real_buffer_filled_size);
+   nir_store_ssbo(&b, to_write_to_fake_buffer, nir_imm_int(&b, 0), nir_imm_int(&b, 4), 0xf, (gl_access_qualifier)0, 4, 0);
+
+   nir_ssa_def *updated_filled_size = nir_iadd(&b, real_buffer_filled_size, real_so_bytes_added);
+   nir_store_ssbo(&b, updated_filled_size, nir_imm_int(&b, 1), nir_imm_int(&b, 0), 1, (gl_access_qualifier)0, 4, 0);
+
+   nir_validate_shader(b.shader, "creation");
+   b.shader->info.num_ssbos = 2;
+   b.shader->info.num_ubos = 0;
+
+   return b.shader;
+}
+
+static struct nir_shader *
+get_draw_auto(const nir_shader_compiler_options *options)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, options, "DrawAuto");
+
+   nir_variable_create(b.shader, nir_var_mem_ssbo, glsl_array_type(glsl_uint_type(), 0, 0), "ssbo");
+   nir_ssa_def *buffer_filled_size = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 0), nir_imm_int(&b, 0), (gl_access_qualifier)0, 4, 0);
+
+   nir_variable *state_var = nullptr;
+   nir_ssa_def *state_var_data = d3d12_get_state_var(&b, D3D12_STATE_VAR_TRANSFORM_GENERIC0, "state_var", glsl_uvec4_type(), &state_var);
+   nir_ssa_def *stride = nir_channel(&b, state_var_data, 0);
+   nir_ssa_def *vb_offset = nir_channel(&b, state_var_data, 1);
+
+   nir_ssa_def *vb_bytes = nir_bcsel(&b, nir_ilt(&b, vb_offset, buffer_filled_size),
+      nir_isub(&b, buffer_filled_size, vb_offset), nir_imm_int(&b, 0));
+
+   nir_ssa_def *vertex_count = nir_idiv(&b, vb_bytes, stride);
+   nir_ssa_def *to_write = nir_vec4(&b, vertex_count, nir_imm_int(&b, 1), nir_imm_int(&b, 0), nir_imm_int(&b, 0));
+   nir_store_ssbo(&b, to_write, nir_imm_int(&b, 0), nir_imm_int(&b, 4), 0xf, (gl_access_qualifier)0, 4, 0);
+
+   nir_validate_shader(b.shader, "creation");
+   b.shader->info.num_ssbos = 1;
+   b.shader->info.num_ubos = 0;
+
+   return b.shader;
+}
+
+static struct nir_shader *
+create_compute_transform(const nir_shader_compiler_options *options, const d3d12_compute_transform_key *key)
 {
    switch (key->type) {
    case d3d12_compute_transform_type::base_vertex:
-      return get_indirect_draw_base_vertex_transform(key);
+      return get_indirect_draw_base_vertex_transform(options, key);
+   case d3d12_compute_transform_type::fake_so_buffer_copy_back:
+      return get_fake_so_buffer_copy_back(options, key);
+   case d3d12_compute_transform_type::fake_so_buffer_vertex_count:
+      return get_fake_so_buffer_vertex_count(options);
+   case d3d12_compute_transform_type::draw_auto:
+      return get_draw_auto(options);
    default:
       unreachable("Invalid transform");
    }
@@ -125,9 +243,11 @@ d3d12_get_compute_transform(struct d3d12_context *ctx, const d3d12_compute_trans
       compute_transform *data = (compute_transform *)MALLOC(sizeof(compute_transform));
       if (!data)
          return NULL;
+      
+      const nir_shader_compiler_options *options = &d3d12_screen(ctx->base.screen)->nir_options;
 
       memcpy(&data->key, key, sizeof(*key));
-      nir_shader *s = create_compute_transform(key);
+      nir_shader *s = create_compute_transform(options, key);
       if (!s) {
          FREE(data);
          return NULL;
@@ -140,6 +260,7 @@ d3d12_get_compute_transform(struct d3d12_context *ctx, const d3d12_compute_trans
          return NULL;
       }
 
+      data->shader->is_variant = true;
       entry = _mesa_hash_table_insert(ctx->compute_transform_cache, &data->key, data);
       assert(entry);
    }
@@ -179,4 +300,34 @@ void
 d3d12_compute_transform_cache_destroy(struct d3d12_context *ctx)
 {
    _mesa_hash_table_destroy(ctx->compute_transform_cache, delete_entry);
+}
+
+void
+d3d12_save_compute_transform_state(struct d3d12_context *ctx, d3d12_compute_transform_save_restore *save)
+{
+   if (ctx->current_predication)
+      ctx->cmdlist->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+
+   memset(save, 0, sizeof(*save));
+   save->cs = ctx->compute_state;
+
+   pipe_resource_reference(&save->cbuf0.buffer, ctx->cbufs[PIPE_SHADER_COMPUTE][1].buffer);
+   save->cbuf0 = ctx->cbufs[PIPE_SHADER_COMPUTE][1];
+
+   for (unsigned i = 0; i < ARRAY_SIZE(save->ssbos); ++i) {
+      pipe_resource_reference(&save->ssbos[i].buffer, ctx->ssbo_views[PIPE_SHADER_COMPUTE][i].buffer);
+      save->ssbos[i] = ctx->ssbo_views[PIPE_SHADER_COMPUTE][i];
+   }
+}
+
+void
+d3d12_restore_compute_transform_state(struct d3d12_context *ctx, d3d12_compute_transform_save_restore *save)
+{
+   ctx->base.bind_compute_state(&ctx->base, save->cs);
+
+   ctx->base.set_constant_buffer(&ctx->base, PIPE_SHADER_COMPUTE, 1, true, &save->cbuf0);
+   ctx->base.set_shader_buffers(&ctx->base, PIPE_SHADER_COMPUTE, 0, ARRAY_SIZE(save->ssbos), save->ssbos, (1u << ARRAY_SIZE(save->ssbos)) - 1);
+
+   if (ctx->current_predication)
+      d3d12_enable_predication(ctx);
 }

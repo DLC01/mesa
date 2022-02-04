@@ -42,6 +42,8 @@
 #include "nir.h"
 #include "frontend/sw_winsys.h"
 
+#include "nir_to_dxil.h"
+
 #include <directx/d3d12sdklayers.h>
 
 #include <dxguids/dxguids.h>
@@ -295,7 +297,8 @@ d3d12_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return D3D12_REQ_GS_INVOCATION_32BIT_OUTPUT_COMPONENT_LIMIT;
 
    case PIPE_CAP_MAX_VARYINGS:
-      return D3D12_PS_INPUT_REGISTER_COUNT;
+      /* Subtract one so that implicit position can be added */
+      return D3D12_PS_INPUT_REGISTER_COUNT - 1;
 
    case PIPE_CAP_NIR_COMPACT_ARRAYS:
       return 1;
@@ -314,6 +317,11 @@ d3d12_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_MULTI_DRAW_INDIRECT_PARAMS:
    case PIPE_CAP_FRAMEBUFFER_NO_ATTACHMENT:
    case PIPE_CAP_SAMPLE_SHADING:
+   case PIPE_CAP_STREAM_OUTPUT_PAUSE_RESUME:
+   case PIPE_CAP_STREAM_OUTPUT_INTERLEAVE_BUFFERS:
+   case PIPE_CAP_INT64:
+   case PIPE_CAP_INT64_DIVMOD:
+   case PIPE_CAP_DOUBLES:
       return 1;
 
    case PIPE_CAP_MAX_VERTEX_STREAMS:
@@ -331,8 +339,6 @@ d3d12_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 static float
 d3d12_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
 {
-   struct d3d12_screen *screen = d3d12_screen(pscreen);
-
    switch (param) {
    case PIPE_CAPF_MIN_LINE_WIDTH:
    case PIPE_CAPF_MIN_LINE_WIDTH_AA:
@@ -353,7 +359,7 @@ d3d12_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
       return D3D12_MAX_POINT_SIZE;
 
    case PIPE_CAPF_MAX_TEXTURE_ANISOTROPY:
-      return screen->max_feature_level >= D3D_FEATURE_LEVEL_10_0 ? 16.0f : 2.0f;
+      return D3D12_MAX_MAXANISOTROPY;
 
    case PIPE_CAPF_MAX_TEXTURE_LOD_BIAS:
       return 15.99f;
@@ -387,18 +393,28 @@ d3d12_get_shader_param(struct pipe_screen *pscreen,
       return 0;
 
    case PIPE_SHADER_CAP_MAX_INPUTS:
-      return screen->max_feature_level >= D3D_FEATURE_LEVEL_10_1 ? 32 : 16;
+      switch (shader) {
+      case PIPE_SHADER_VERTEX: return D3D12_VS_INPUT_REGISTER_COUNT;
+      case PIPE_SHADER_FRAGMENT: return D3D12_PS_INPUT_REGISTER_COUNT;
+      case PIPE_SHADER_GEOMETRY: return D3D12_GS_INPUT_REGISTER_COUNT;
+      case PIPE_SHADER_TESS_CTRL: return D3D12_HS_CONTROL_POINT_PHASE_INPUT_REGISTER_COUNT;
+      case PIPE_SHADER_TESS_EVAL: return D3D12_DS_INPUT_CONTROL_POINT_REGISTER_COUNT;
+      case PIPE_SHADER_COMPUTE: return 0;
+      default: unreachable("Unexpected shader");
+      }
+      break;
 
    case PIPE_SHADER_CAP_MAX_OUTPUTS:
-      if (shader == PIPE_SHADER_FRAGMENT) {
-         /* same as max MRTs (not sure if this is correct) */
-         if (screen->max_feature_level >= D3D_FEATURE_LEVEL_10_0)
-            return 8;
-         else if (screen->max_feature_level == D3D_FEATURE_LEVEL_9_3)
-            return 4;
-         return 1;
+      switch (shader) {
+      case PIPE_SHADER_VERTEX: return D3D12_VS_OUTPUT_REGISTER_COUNT;
+      case PIPE_SHADER_FRAGMENT: return D3D12_PS_OUTPUT_REGISTER_COUNT;
+      case PIPE_SHADER_GEOMETRY: return D3D12_GS_OUTPUT_REGISTER_COUNT;
+      case PIPE_SHADER_TESS_CTRL: return D3D12_HS_CONTROL_POINT_PHASE_OUTPUT_REGISTER_COUNT;
+      case PIPE_SHADER_TESS_EVAL: return D3D12_DS_OUTPUT_REGISTER_COUNT;
+      case PIPE_SHADER_COMPUTE: return 0;
+      default: unreachable("Unexpected shader");
       }
-      return screen->max_feature_level >= D3D_FEATURE_LEVEL_10_1 ? 32 : 16;
+      break;
 
    case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
       if (screen->opts.ResourceBindingTier == D3D12_RESOURCE_BINDING_TIER_1)
@@ -1100,6 +1116,12 @@ d3d12_init_screen(struct d3d12_screen *screen, struct sw_winsys *winsys, IUnknow
       debug_printf("D3D12: failed to get device options\n");
       goto failed;
    }
+   if (FAILED(screen->dev->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1,
+                                               &screen->opts1,
+                                               sizeof(screen->opts1)))) {
+      debug_printf("D3D12: failed to get device options\n");
+      goto failed;
+   }
    if (FAILED(screen->dev->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS2,
                                                &screen->opts2,
                                                sizeof(screen->opts2)))) {
@@ -1201,6 +1223,22 @@ d3d12_init_screen(struct d3d12_screen *screen, struct sw_winsys *winsys, IUnknow
 
    screen->have_load_at_vertex = can_attribute_at_vertex(screen);
    screen->support_shader_images = can_shader_image_load_all_formats(screen);
+
+   screen->nir_options = *dxil_get_nir_compiler_options();
+
+   static constexpr uint64_t known_good_warp_version = 10ull << 48 | 22000ull << 16;
+   if ((screen->vendor_id == HW_VENDOR_MICROSOFT &&
+        screen->driver_version < known_good_warp_version) ||
+      !screen->opts1.Int64ShaderOps) {
+      /* Work around old versions of WARP that are completely broken for 64bit shifts */
+      screen->nir_options.lower_pack_64_2x32_split = false;
+      screen->nir_options.lower_unpack_64_2x32_split = false;
+      screen->nir_options.lower_int64_options = (nir_lower_int64_options)~0;
+   }
+
+   if (!screen->opts.DoublePrecisionFloatShaderOps)
+      screen->nir_options.lower_doubles_options = (nir_lower_doubles_options)~0;
+
    return true;
 
 failed:

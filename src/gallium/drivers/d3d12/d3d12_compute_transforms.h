@@ -29,7 +29,22 @@
 
 enum class d3d12_compute_transform_type
 {
+   /* Extract vertex shader draw params (base vertex, instance, draw ID) from
+    * a stream of indirect draw (indexed) params
+    */
    base_vertex,
+   /* Given an SO buffer's declaration in the key, copy filled items from a fake (multiplied)
+    * buffer into the original SO buffer, after the original filled size (loaded from the indirect
+    * arg buffer double-bound as a UBO), making sure to skip gaps
+    */
+   fake_so_buffer_copy_back,
+   /* Append a fake SO buffer filed size with (vertex count, 1, 1, original filled size)
+    * for an indirect dispatch of the fake_so_buffer_copy_back transform, and also update
+    * the original filled size with the fake filled size
+    */
+   fake_so_buffer_vertex_count,
+   /* Append a buffer filled size with (vertex count, 1, 0, 0) */
+   draw_auto,
    max,
 };
 
@@ -37,10 +52,22 @@ struct d3d12_compute_transform_key
 {
    d3d12_compute_transform_type type;
 
-   struct {
-      unsigned indexed:1;
-      unsigned dynamic_count:1;
-   } base_vertex;
+   union
+   {
+      struct {
+         unsigned indexed : 1;
+         unsigned dynamic_count : 1;
+      } base_vertex;
+
+      struct {
+         uint16_t stride;
+         uint16_t num_ranges;
+         struct {
+            uint16_t offset;
+            uint16_t size;
+         } ranges[PIPE_MAX_SO_OUTPUTS];
+      } fake_so_buffer_copy_back;
+   };
 };
 
 d3d12_shader_selector *
@@ -51,5 +78,18 @@ d3d12_compute_transform_cache_init(struct d3d12_context *ctx);
 
 void
 d3d12_compute_transform_cache_destroy(struct d3d12_context *ctx);
+
+struct d3d12_compute_transform_save_restore
+{
+   struct d3d12_shader_selector *cs;
+   struct pipe_constant_buffer cbuf0;
+   struct pipe_shader_buffer ssbos[2];
+};
+
+void
+d3d12_save_compute_transform_state(struct d3d12_context *ctx, d3d12_compute_transform_save_restore *save);
+
+void
+d3d12_restore_compute_transform_state(struct d3d12_context *ctx, d3d12_compute_transform_save_restore *save);
 
 #endif

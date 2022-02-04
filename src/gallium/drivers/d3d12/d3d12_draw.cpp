@@ -370,9 +370,9 @@ fill_graphics_state_vars(struct d3d12_context *ctx,
          ptr[1] = dinfo->start_instance;
          ptr[2] = drawid;
          ptr[3] = dinfo->index_size ? -1 : 0;
-         cmd_sig_key->draw_params = 1;
+         cmd_sig_key->draw_or_dispatch_params = 1;
          cmd_sig_key->root_sig = ctx->gfx_pipeline_state.root_signature;
-         cmd_sig_key->draw_params_root_const_offset = size;
+         cmd_sig_key->params_root_const_offset = size;
          size += 4;
          break;
       case D3D12_STATE_VAR_DEPTH_TRANSFORM:
@@ -404,7 +404,8 @@ static unsigned
 fill_compute_state_vars(struct d3d12_context *ctx,
                         const struct pipe_grid_info *info,
                         struct d3d12_shader *shader,
-                        uint32_t *values)
+                        uint32_t *values,
+                        struct d3d12_cmd_signature_key *cmd_sig_key)
 {
    unsigned size = 0;
 
@@ -416,6 +417,9 @@ fill_compute_state_vars(struct d3d12_context *ctx,
          ptr[0] = info->grid[0];
          ptr[1] = info->grid[1];
          ptr[2] = info->grid[2];
+         cmd_sig_key->draw_or_dispatch_params = 1;
+         cmd_sig_key->root_sig = ctx->compute_pipeline_state.root_signature;
+         cmd_sig_key->params_root_const_offset = size;
          size += 4;
          break;
       case D3D12_STATE_VAR_TRANSFORM_GENERIC0: {
@@ -550,8 +554,8 @@ update_graphics_root_parameters(struct d3d12_context *ctx,
       if (shader_sel->current->num_state_vars > 0) {
          uint32_t constants[D3D12_MAX_GRAPHICS_STATE_VARS * 4];
          unsigned size = fill_graphics_state_vars(ctx, dinfo, drawid, draw, shader_sel->current, constants, cmd_sig_key);
-         if (cmd_sig_key->draw_params)
-            cmd_sig_key->draw_params_root_const_param = num_params;
+         if (cmd_sig_key->draw_or_dispatch_params)
+            cmd_sig_key->params_root_const_param = num_params;
          ctx->cmdlist->SetGraphicsRoot32BitConstants(num_params, size, constants, 0);
          num_params++;
       }
@@ -563,7 +567,8 @@ static unsigned
 update_compute_root_parameters(struct d3d12_context *ctx,
                                const struct pipe_grid_info *info,
                                D3D12_GPU_DESCRIPTOR_HANDLE root_desc_tables[MAX_DESCRIPTOR_TABLES],
-                               int root_desc_indices[MAX_DESCRIPTOR_TABLES])
+                               int root_desc_indices[MAX_DESCRIPTOR_TABLES],
+                               struct d3d12_cmd_signature_key *cmd_sig_key)
 {
    unsigned num_params = 0;
    unsigned num_root_descriptors = 0;
@@ -574,7 +579,9 @@ update_compute_root_parameters(struct d3d12_context *ctx,
       /* TODO Don't always update state vars */
       if (shader_sel->current->num_state_vars > 0) {
          uint32_t constants[D3D12_MAX_COMPUTE_STATE_VARS * 4];
-         unsigned size = fill_compute_state_vars(ctx, info, shader_sel->current, constants);
+         unsigned size = fill_compute_state_vars(ctx, info, shader_sel->current, constants, cmd_sig_key);
+         if (cmd_sig_key->draw_or_dispatch_params)
+            cmd_sig_key->params_root_const_param = num_params;
          ctx->cmdlist->SetComputeRoot32BitConstants(num_params, size, constants, 0);
          num_params++;
       }
@@ -750,25 +757,15 @@ update_draw_indirect_with_sysvals(struct d3d12_context *ctx,
    if (!any)
       return false;
 
-   if (ctx->current_predication)
-      ctx->cmdlist->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+   d3d12_compute_transform_save_restore save;
+   d3d12_save_compute_transform_state(ctx, &save);
 
    auto indirect_in = *indirect_inout;
    *indirect_inout = indirect_out;
 
-   d3d12_shader_selector *save_cs = ctx->compute_state;
-
-   pipe_constant_buffer save_cs_cbuf0 = {};
-
-   pipe_shader_buffer save_cs_ssbos[2] = {};
-   for (unsigned i = 0; i < 2; ++i) {
-      pipe_resource_reference(&save_cs_ssbos[i].buffer, ctx->ssbo_views[PIPE_SHADER_COMPUTE][i].buffer);
-      save_cs_ssbos[i] = ctx->ssbo_views[PIPE_SHADER_COMPUTE][i];
-   }
-
-   d3d12_compute_transform_key key = {
-      d3d12_compute_transform_type::base_vertex,
-   };
+   d3d12_compute_transform_key key;
+   memset(&key, 0, sizeof(key));
+   key.type = d3d12_compute_transform_type::base_vertex;
    key.base_vertex.indexed = dinfo->index_size > 0;
    key.base_vertex.dynamic_count = indirect_in->indirect_draw_count != nullptr;
    ctx->base.bind_compute_state(&ctx->base, d3d12_get_compute_transform(ctx, &key));
@@ -778,15 +775,12 @@ update_draw_indirect_with_sysvals(struct d3d12_context *ctx,
    ctx->transform_state_vars[2] = drawid;
 
    if (indirect_in->indirect_draw_count) {
-      pipe_resource_reference(&save_cs_cbuf0.buffer, ctx->cbufs[PIPE_SHADER_COMPUTE][0].buffer);
-      save_cs_cbuf0 = ctx->cbufs[PIPE_SHADER_COMPUTE][0];
-
       pipe_constant_buffer draw_count_cbuf;
       draw_count_cbuf.buffer = indirect_in->indirect_draw_count;
       draw_count_cbuf.buffer_offset = indirect_in->indirect_draw_count_offset;
       draw_count_cbuf.buffer_size = 4;
       draw_count_cbuf.user_buffer = nullptr;
-      ctx->base.set_constant_buffer(&ctx->base, PIPE_SHADER_COMPUTE, 0, true, &draw_count_cbuf);
+      ctx->base.set_constant_buffer(&ctx->base, PIPE_SHADER_COMPUTE, 1, true, &draw_count_cbuf);
    }
    
    pipe_shader_buffer new_cs_ssbos[2];
@@ -808,24 +802,66 @@ update_draw_indirect_with_sysvals(struct d3d12_context *ctx,
    new_cs_ssbos[1].buffer_size = output_buf_templ.width0;
    ctx->base.set_shader_buffers(&ctx->base, PIPE_SHADER_COMPUTE, 0, 2, new_cs_ssbos, 2);
 
-   pipe_grid_info grid = {
-      .block = {1, 1, 1},
-      .grid = {indirect_in->draw_count, 1, 1}
-   };
+   pipe_grid_info grid = {};
+   grid.block[0] = grid.block[1] = grid.block[2] = 1;
+   grid.grid[0] = indirect_in->draw_count;
+   grid.grid[1] = grid.grid[2] = 1;
    ctx->base.launch_grid(&ctx->base, &grid);
 
-   ctx->base.bind_compute_state(&ctx->base, save_cs);
-   if (save_cs_cbuf0.buffer)
-      ctx->base.set_constant_buffer(&ctx->base, PIPE_SHADER_COMPUTE, 0, true, &save_cs_cbuf0);
-   ctx->base.set_shader_buffers(&ctx->base, PIPE_SHADER_COMPUTE, 0, 2, save_cs_ssbos, 3);
-
-   if (ctx->current_predication)
-      d3d12_enable_predication(ctx);
+   d3d12_restore_compute_transform_state(ctx, &save);
 
    *indirect_out = *indirect_in;
    indirect_out->buffer = new_cs_ssbos[1].buffer;
    indirect_out->offset = 0;
    indirect_out->stride = out_stride;
+   return true;
+}
+
+static bool
+update_draw_auto(struct d3d12_context *ctx,
+   const struct pipe_draw_indirect_info **indirect_inout,
+   struct pipe_draw_indirect_info *indirect_out)
+{
+   if (*indirect_inout == nullptr ||
+       (*indirect_inout)->count_from_stream_output == nullptr ||
+       ctx->gfx_stages[PIPE_SHADER_VERTEX] == nullptr)
+      return false;
+
+   d3d12_compute_transform_save_restore save;
+   d3d12_save_compute_transform_state(ctx, &save);
+
+   auto indirect_in = *indirect_inout;
+   *indirect_inout = indirect_out;
+
+   d3d12_compute_transform_key key;
+   memset(&key, 0, sizeof(key));
+   key.type = d3d12_compute_transform_type::draw_auto;
+   ctx->base.bind_compute_state(&ctx->base, d3d12_get_compute_transform(ctx, &key));
+
+   auto so_arg = indirect_in->count_from_stream_output;
+   d3d12_stream_output_target *target = (d3d12_stream_output_target *)so_arg;
+
+   ctx->transform_state_vars[0] = ctx->vbs[0].stride;
+   ctx->transform_state_vars[1] = ctx->vbs[0].buffer_offset - so_arg->buffer_offset;
+   
+   pipe_shader_buffer new_cs_ssbo;
+   new_cs_ssbo.buffer = target->fill_buffer;
+   new_cs_ssbo.buffer_offset = target->fill_buffer_offset;
+   new_cs_ssbo.buffer_size = target->fill_buffer->width0 - new_cs_ssbo.buffer_offset;
+   ctx->base.set_shader_buffers(&ctx->base, PIPE_SHADER_COMPUTE, 0, 1, &new_cs_ssbo, 1);
+
+   pipe_grid_info grid = {};
+   grid.block[0] = grid.block[1] = grid.block[2] = 1;
+   grid.grid[0] = grid.grid[1] = grid.grid[2] = 1;
+   ctx->base.launch_grid(&ctx->base, &grid);
+
+   d3d12_restore_compute_transform_state(ctx, &save);
+
+   *indirect_out = *indirect_in;
+   pipe_resource_reference(&indirect_out->buffer, target->fill_buffer);
+   indirect_out->offset = target->fill_buffer_offset + 4;
+   indirect_out->stride = sizeof(D3D12_DRAW_ARGUMENTS);
+   indirect_out->count_from_stream_output = nullptr;
    return true;
 }
 
@@ -869,7 +905,8 @@ d3d12_draw_vbo(struct pipe_context *pctx,
       return;
    }
 
-   bool indirect_with_sysvals = update_draw_indirect_with_sysvals(ctx, dinfo, drawid_offset, &indirect, &patched_indirect);
+   bool draw_auto = update_draw_auto(ctx, &indirect, &patched_indirect);
+   bool indirect_with_sysvals = !draw_auto && update_draw_indirect_with_sysvals(ctx, dinfo, drawid_offset, &indirect, &patched_indirect);
    struct d3d12_cmd_signature_key cmd_sig_key;
    memset(&cmd_sig_key, 0, sizeof(cmd_sig_key));
 
@@ -1174,14 +1211,15 @@ d3d12_draw_vbo(struct pipe_context *pctx,
       assert(!indirect->count_from_stream_output);
    }
 
-   d3d12_apply_resource_states(ctx);
+   d3d12_apply_resource_states(ctx, false);
 
    for (unsigned i = 0; i < num_root_descriptors; ++i)
       ctx->cmdlist->SetGraphicsRootDescriptorTable(root_desc_indices[i], root_desc_tables[i]);
 
    if (indirect) {
-      ID3D12CommandSignature *cmd_sig = d3d12_get_gfx_cmd_signature(ctx, &cmd_sig_key);
-      ctx->cmdlist->ExecuteIndirect(cmd_sig, indirect->draw_count, indirect_arg_buf,
+      unsigned draw_count = draw_auto ? 1 : indirect->draw_count;
+      ID3D12CommandSignature *cmd_sig = d3d12_get_cmd_signature(ctx, &cmd_sig_key);
+      ctx->cmdlist->ExecuteIndirect(cmd_sig, draw_count, indirect_arg_buf,
          indirect_arg_offset, indirect_count_buf, indirect_count_offset);
    } else {
       if (dinfo->index_size > 0)
@@ -1215,25 +1253,61 @@ d3d12_draw_vbo(struct pipe_context *pctx,
    pipe_resource_reference(&patched_indirect.buffer, NULL);
 }
 
+static bool
+update_dispatch_indirect_with_sysvals(struct d3d12_context *ctx,
+                                      struct pipe_resource **indirect_inout,
+                                      unsigned *indirect_offset_inout,
+                                      struct pipe_resource **indirect_out)
+{
+   if (*indirect_inout == nullptr ||
+       ctx->compute_state == nullptr)
+      return false;
+
+   if (!BITSET_TEST(ctx->compute_state->current->nir->info.system_values_read, SYSTEM_VALUE_NUM_WORKGROUPS))
+      return false;
+
+   if (ctx->current_predication)
+      ctx->cmdlist->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+
+   auto indirect_in = *indirect_inout;
+
+   /* 6 uints: 2 copies of the indirect arg buffer */
+   pipe_resource output_buf_templ = {};
+   output_buf_templ.target = PIPE_BUFFER;
+   output_buf_templ.width0 = sizeof(uint32_t) * 6;
+   output_buf_templ.height0 = output_buf_templ.depth0 = output_buf_templ.array_size =
+      output_buf_templ.last_level = 1;
+   output_buf_templ.usage = PIPE_USAGE_DEFAULT;
+   *indirect_out = ctx->base.screen->resource_create(ctx->base.screen, &output_buf_templ);
+
+   struct pipe_box src_box = { (int)*indirect_offset_inout, 0, 0, sizeof(uint32_t) * 3, 1, 1 };
+   ctx->base.resource_copy_region(&ctx->base, *indirect_out, 0, 0, 0, 0, indirect_in, 0, &src_box);
+   ctx->base.resource_copy_region(&ctx->base, *indirect_out, 0, src_box.width, 0, 0, indirect_in, 0, &src_box);
+
+   if (ctx->current_predication)
+      d3d12_enable_predication(ctx);
+
+   *indirect_inout = *indirect_out;
+   *indirect_offset_inout = 0;
+   return true;
+}
+
 void
 d3d12_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
 {
    struct d3d12_context *ctx = d3d12_context(pctx);
    struct d3d12_batch *batch;
+   struct pipe_resource *patched_indirect = nullptr;
 
-   if (info->indirect) {
-      /* TODO: Use a compute shader to retrieve state vars if necessary, and do an actual indirect dispatch */
-      pipe_box box = { (int)info->indirect_offset, 0, 0, sizeof(info->grid), 1, 1 };
-      pipe_transfer *transfer = nullptr;
-      void *map = pctx->buffer_map(pctx, info->indirect, 0, PIPE_MAP_READ, &box, &transfer);
-      pipe_grid_info new_info = *info;
-      new_info.indirect = nullptr;
-      memcpy(new_info.grid, map, sizeof(new_info.grid));
-      pctx->buffer_unmap(pctx, transfer);
+   struct d3d12_cmd_signature_key cmd_sig_key;
+   memset(&cmd_sig_key, 0, sizeof(cmd_sig_key));
+   cmd_sig_key.compute = 1;
+   cmd_sig_key.multi_draw_stride = sizeof(D3D12_DISPATCH_ARGUMENTS);
 
-      d3d12_launch_grid(pctx, &new_info);
-      return;
-   }
+   struct pipe_resource *indirect = info->indirect;
+   unsigned indirect_offset = info->indirect_offset;
+   if (indirect && update_dispatch_indirect_with_sysvals(ctx, &indirect, &indirect_offset, &patched_indirect))
+      cmd_sig_key.multi_draw_stride = sizeof(D3D12_DISPATCH_ARGUMENTS) * 2;
 
    d3d12_select_compute_shader_variants(ctx, info);
    d3d12_validate_queries(ctx);
@@ -1276,14 +1350,31 @@ d3d12_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
 
    D3D12_GPU_DESCRIPTOR_HANDLE root_desc_tables[MAX_DESCRIPTOR_TABLES];
    int root_desc_indices[MAX_DESCRIPTOR_TABLES];
-   unsigned num_root_descriptors = update_compute_root_parameters(ctx, info, root_desc_tables, root_desc_indices);
+   unsigned num_root_descriptors = update_compute_root_parameters(ctx, info, root_desc_tables, root_desc_indices, &cmd_sig_key);
 
-   d3d12_apply_resource_states(ctx);
+   ID3D12Resource *indirect_arg_buf = nullptr;
+   uint64_t indirect_arg_offset = 0;
+   if (indirect) {
+      struct d3d12_resource *indirect_buf = d3d12_resource(indirect);
+      uint64_t buf_offset = 0;
+      indirect_arg_buf = d3d12_resource_underlying(indirect_buf, &buf_offset);
+      indirect_arg_offset = indirect_offset + buf_offset;
+      d3d12_transition_resource_state(ctx, indirect_buf,
+         D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_BIND_INVALIDATE_NONE);
+      d3d12_batch_reference_resource(batch, indirect_buf, false);
+   }
+
+   d3d12_apply_resource_states(ctx, ctx->compute_state->is_variant);
 
    for (unsigned i = 0; i < num_root_descriptors; ++i)
       ctx->cmdlist->SetComputeRootDescriptorTable(root_desc_indices[i], root_desc_tables[i]);
 
-   ctx->cmdlist->Dispatch(info->grid[0], info->grid[1], info->grid[2]);
+   if (indirect) {
+      ID3D12CommandSignature *cmd_sig = d3d12_get_cmd_signature(ctx, &cmd_sig_key);
+      ctx->cmdlist->ExecuteIndirect(cmd_sig, 1, indirect_arg_buf, indirect_arg_offset, nullptr, 0);
+   } else {
+      ctx->cmdlist->Dispatch(info->grid[0], info->grid[1], info->grid[2]);
+   }
 
    ctx->state_dirty &= D3D12_DIRTY_GFX_MASK;
    ctx->cmdlist_dirty &= D3D12_DIRTY_GFX_MASK;
@@ -1293,4 +1384,5 @@ d3d12_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
    batch->pending_memory_barrier = false;
 
    ctx->shader_dirty[PIPE_SHADER_COMPUTE] = 0;
+   pipe_resource_reference(&patched_indirect, nullptr);
 }

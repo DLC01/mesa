@@ -1404,9 +1404,9 @@ iris_flush_resource(struct pipe_context *ctx, struct pipe_resource *resource)
        * sure to get rid of any compression that a consumer wouldn't know how
        * to handle.
        */
-      for (int i = 0; i < IRIS_BATCH_COUNT; i++) {
-         if (iris_batch_references(&ice->batches[i], res->bo))
-            iris_batch_flush(&ice->batches[i]);
+      iris_foreach_batch(ice, batch) {
+         if (iris_batch_references(batch, res->bo))
+            iris_batch_flush(batch);
       }
 
       iris_resource_disable_aux(res);
@@ -1581,13 +1581,16 @@ iris_resource_get_param(struct pipe_screen *pscreen,
    bool mod_with_aux =
       res->mod_info && res->mod_info->aux_usage != ISL_AUX_USAGE_NONE;
    bool wants_aux = mod_with_aux && plane > 0;
+   bool wants_cc = mod_with_aux &&
+      mod_plane_is_clear_color(res->mod_info->modifier, plane);
    bool result;
    unsigned handle;
 
    iris_resource_disable_aux_on_first_query(resource, handle_usage);
    iris_resource_disable_suballoc_on_first_query(pscreen, ctx, res);
 
-   struct iris_bo *bo = wants_aux ? res->aux.bo : res->bo;
+   struct iris_bo *bo = wants_cc ? res->aux.clear_color_bo :
+                        wants_aux ? res->aux.bo : res->bo;
 
    assert(iris_bo_is_real(bo));
 
@@ -1602,12 +1605,19 @@ iris_resource_get_param(struct pipe_screen *pscreen,
       }
       return true;
    case PIPE_RESOURCE_PARAM_STRIDE:
-      *value = wants_aux ? res->aux.surf.row_pitch_B : res->surf.row_pitch_B;
+      *value = wants_cc ? 1 :
+               wants_aux ? res->aux.surf.row_pitch_B : res->surf.row_pitch_B;
+
+      /* Mesa's implementation of eglCreateImage rejects strides of zero (see
+       * dri2_check_dma_buf_attribs). Ensure we return a non-zero stride as
+       * this value may be queried from GBM and passed into EGL.
+       */
+      assert(*value);
+
       return true;
    case PIPE_RESOURCE_PARAM_OFFSET:
-      *value = wants_aux ?
-               mod_plane_is_clear_color(res->mod_info->modifier, plane) ?
-               res->aux.clear_color_offset : res->aux.offset : 0;
+      *value = wants_cc ? res->aux.clear_color_offset :
+               wants_aux ? res->aux.offset : 0;
       return true;
    case PIPE_RESOURCE_PARAM_MODIFIER:
       *value = res->mod_info ? res->mod_info->modifier :
@@ -1731,8 +1741,8 @@ resource_is_busy(struct iris_context *ice,
 {
    bool busy = iris_bo_busy(res->bo);
 
-   for (int i = 0; i < IRIS_BATCH_COUNT; i++)
-      busy |= iris_batch_references(&ice->batches[i], res->bo);
+   iris_foreach_batch(ice, batch)
+      busy |= iris_batch_references(batch, res->bo);
 
    return busy;
 }
@@ -2329,9 +2339,9 @@ iris_transfer_map(struct pipe_context *ctx,
       }
 
       if (!(usage & PIPE_MAP_UNSYNCHRONIZED)) {
-         for (int i = 0; i < IRIS_BATCH_COUNT; i++) {
-            if (iris_batch_references(&ice->batches[i], res->bo))
-               iris_batch_flush(&ice->batches[i]);
+         iris_foreach_batch(ice, batch) {
+            if (iris_batch_references(batch, res->bo))
+               iris_batch_flush(batch);
          }
       }
 
@@ -2374,8 +2384,7 @@ iris_transfer_flush_region(struct pipe_context *ctx,
    }
 
    if (history_flush & ~PIPE_CONTROL_CS_STALL) {
-      for (int i = 0; i < IRIS_BATCH_COUNT; i++) {
-         struct iris_batch *batch = &ice->batches[i];
+      iris_foreach_batch(ice, batch) {
          if (batch->contains_draw || batch->cache.render->entries) {
             iris_batch_maybe_flush(batch, 24);
             iris_emit_pipe_control_flush(batch,
@@ -2464,9 +2473,9 @@ iris_texture_subdata(struct pipe_context *ctx,
 
    iris_resource_access_raw(ice, res, level, box->z, box->depth, true);
 
-   for (int i = 0; i < IRIS_BATCH_COUNT; i++) {
-      if (iris_batch_references(&ice->batches[i], res->bo))
-         iris_batch_flush(&ice->batches[i]);
+   iris_foreach_batch(ice, batch) {
+      if (iris_batch_references(batch, res->bo))
+         iris_batch_flush(batch);
    }
 
    uint8_t *dst = iris_bo_map(&ice->dbg, res->bo, MAP_WRITE | MAP_RAW);

@@ -154,6 +154,15 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
          &physical_dev->transform_feedback_features;
    }
 
+   if (physical_dev->renderer_extensions.EXT_extended_dynamic_state) {
+      physical_dev->extended_dynamic_state_features.sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT;
+      physical_dev->extended_dynamic_state_features.pNext =
+         physical_dev->features.pNext;
+      physical_dev->features.pNext =
+         &physical_dev->extended_dynamic_state_features;
+   }
+
    vn_call_vkGetPhysicalDeviceFeatures2(
       instance, vn_physical_device_to_handle(physical_dev),
       &physical_dev->features);
@@ -954,6 +963,8 @@ vn_physical_device_get_passthrough_extensions(
       .EXT_separate_stencil_usage = true,
       .EXT_shader_viewport_index_layer = true,
 
+      /* promoted to VK_VERSION_1_3 */
+      .EXT_extended_dynamic_state = true,
    /* EXT */
 #ifndef ANDROID
       .EXT_image_drm_format_modifier = true,
@@ -1048,14 +1059,14 @@ vn_physical_device_init_renderer_extensions(
             continue;
 
          /* check encoder support */
-         const uint32_t spec_version =
-            vn_info_extension_spec_version(props->extensionName);
-         if (!spec_version)
+         const struct vn_info_extension *enc_ext =
+            vn_info_extension_get(props->extensionName);
+         if (!enc_ext)
             continue;
 
          physical_dev->renderer_extensions.extensions[i] = true;
          physical_dev->extension_spec_versions[i] =
-            MIN2(exts[j].specVersion, spec_version);
+            MIN2(exts[j].specVersion, enc_ext->spec_version);
 
          break;
       }
@@ -1629,6 +1640,7 @@ vn_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
       VkPhysicalDeviceVulkanMemoryModelFeatures *vulkan_memory_model;
 
       VkPhysicalDeviceTransformFeedbackFeaturesEXT *transform_feedback;
+      VkPhysicalDeviceExtendedDynamicStateFeaturesEXT *extended_dynamic_state;
    } u;
 
    u.pnext = (VkBaseOutStructure *)pFeatures;
@@ -1789,6 +1801,10 @@ vn_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
          memcpy(u.transform_feedback,
                 &physical_dev->transform_feedback_features,
                 sizeof(physical_dev->transform_feedback_features));
+         break;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT:
+         u.extended_dynamic_state->extendedDynamicState =
+            physical_dev->extended_dynamic_state_features.extendedDynamicState;
          break;
       default:
          break;
